@@ -43,7 +43,6 @@ describe("GeneralIndexModule", () => {
 
   let index: CKToken;
   let indexWithWeth: CKToken;
-  let indexWithPositionModule: CKToken;
   let indexModule: GeneralIndexModule;
 
   let balancerExchangeAdapter: BalancerV1IndexExchangeAdapter;
@@ -111,7 +110,7 @@ describe("GeneralIndexModule", () => {
     index = await setup.createCKToken(
       indexComponents,
       indexUnits,               // $100 of each
-      [setup.issuanceModule.address, setup.streamingFeeModule.address, indexModule.address],
+      [setup.issuanceModule.address, setup.streamingFeeModule.address, indexModule.address, positionModule.address],
     );
 
     const feeSettings = {
@@ -123,13 +122,7 @@ describe("GeneralIndexModule", () => {
 
     await setup.streamingFeeModule.initialize(index.address, feeSettings);
     await setup.issuanceModule.initialize(index.address, ADDRESS_ZERO);
-
-    indexWithPositionModule = await setup.createCKToken(
-      indexComponents,
-      indexUnits,
-      [positionModule.address, indexModule.address]
-    );
-    await indexWithPositionModule.connect(positionModule.wallet).initializeModule();
+    await index.connect(positionModule.wallet).initializeModule();
 
     indexWithWethComponents = [uniswapSetup.uni.address, setup.wbtc.address, setup.dai.address, setup.weth.address];
     indexWithWethUnits = [ether(86.9565217), bitcoin(.01111111), ether(100), ether(0.434782609)];
@@ -256,23 +249,18 @@ describe("GeneralIndexModule", () => {
     });
 
     describe("when there are external positions for a component", async () => {
-        beforeEach(async () => {
-          subjectCKToken = indexWithPositionModule;
-          await subjectCKToken.connect(positionModule.wallet).addExternalPositionModule(
-            indexComponents[0],
-            positionModule.address
-          );
+      beforeEach(async () => {
+        await subjectCKToken.connect(positionModule.wallet)
+          .addExternalPositionModule(indexComponents[0], positionModule.address);
         });
 
         afterEach(async () => {
-          await subjectCKToken.connect(positionModule.wallet).removeExternalPositionModule(
-            indexComponents[0],
-            positionModule.address
-          );
+          await subjectCKToken.connect(positionModule.wallet)
+            .removeExternalPositionModule(indexComponents[0], positionModule.address);
         });
 
-        it("should revert", async() => {
-           await expect(subject()).to.be.revertedWith("External positions not allowed");
+        it("should revert", async () => {
+          await expect(subject()).to.be.revertedWith("External positions not allowed");
         });
       });
   });
@@ -312,14 +300,6 @@ describe("GeneralIndexModule", () => {
         [ether(800), bitcoin(.1), ether(1000), ether(10000), ether(500)],
         [uniswapAdapterName, sushiswapAdapterName, balancerAdapterName, "", sushiswapAdapterName],
         [ONE_MINUTE_IN_SECONDS.mul(3), ONE_MINUTE_IN_SECONDS, ONE_MINUTE_IN_SECONDS.mul(2), ZERO, ONE_MINUTE_IN_SECONDS],
-      );
-
-      await initCKToken(
-        indexWithPositionModule,
-        [uniswapSetup.uni.address, setup.wbtc.address, setup.dai.address, sushiswapSetup.uni.address],
-        [ether(800), bitcoin(.1), ether(1000), ether(500)],
-        [uniswapAdapterName, sushiswapAdapterName, balancerAdapterName, sushiswapAdapterName],
-        [ONE_MINUTE_IN_SECONDS.mul(3), ONE_MINUTE_IN_SECONDS, ONE_MINUTE_IN_SECONDS.mul(2), ONE_MINUTE_IN_SECONDS]
       );
     });
 
@@ -373,9 +353,19 @@ describe("GeneralIndexModule", () => {
       });
 
       it("emits the correct RebalanceStarted event", async () => {
-        await expect(subject()).to.emit(indexModule, "RebalanceStarted").withArgs(
-          subjectCKToken.address
-        );
+        const currentComponents = await subjectCKToken.getComponents();
+        const expectedAggregateComponents = [...currentComponents, ...subjectNewComponents];
+        const expectedAggregateTargetUnits = [...subjectOldTargetUnits, ...subjectNewTargetUnits];
+        const expectedPositionMultiplier = await subjectCKToken.positionMultiplier();
+
+        await expect(subject())
+          .to.emit(indexModule, "RebalanceStarted")
+          .withArgs(
+            subjectCKToken.address,
+            expectedAggregateComponents,
+            expectedAggregateTargetUnits,
+            expectedPositionMultiplier,
+          );
       });
 
       describe("newComponents and newComponentsTargetUnits are not of same length", async () => {
@@ -411,8 +401,6 @@ describe("GeneralIndexModule", () => {
 
       describe("when there are external positions for a component", async () => {
         beforeEach(async () => {
-          subjectCKToken = indexWithPositionModule;
-
           await subjectCKToken.connect(positionModule.wallet).addExternalPositionModule(
             subjectNewComponents[0],
             positionModule.address
@@ -1081,6 +1069,22 @@ describe("GeneralIndexModule", () => {
           });
         });
 
+        describe("when there are external positions for a component", async () => {
+          beforeEach(async () => {
+            await subjectCKToken.connect(positionModule.wallet)
+              .addExternalPositionModule(subjectComponent, positionModule.address);
+            });
+
+          afterEach(async () => {
+            await subjectCKToken.connect(positionModule.wallet)
+              .removeExternalPositionModule(subjectComponent, positionModule.address);
+            });
+
+          it("should revert", async () => {
+            await expect(subject()).to.be.revertedWith("External positions not allowed");
+            });
+        });
+
         describe("when caller is a contract", async () => {
           let subjectTarget: Address;
           let subjectCallData: string;
@@ -1525,15 +1529,15 @@ describe("GeneralIndexModule", () => {
           });
 
           describe("when protocol fees is charged", async () => {
-            let feePercentage: BigNumber;
+            let subjectFeePercentage: BigNumber;
 
             beforeEach(async () => {
-              feePercentage = ether(0.05);
+              subjectFeePercentage = ether(0.05);
               setup.controller = setup.controller.connect(owner.wallet);
               await setup.controller.addFee(
                 indexModule.address,
                 ZERO, // Fee type on trade function denoted as 0
-                feePercentage // Set fee to 5 bps
+                subjectFeePercentage, // Set fee to 5 bps
               );
             });
 
@@ -1545,7 +1549,7 @@ describe("GeneralIndexModule", () => {
 
               const lastBlockTimestamp = await getLastBlockTimestamp();
 
-              const protocolFee = expectedWbtcOut.mul(feePercentage).div(ether(1));
+              const protocolFee = expectedWbtcOut.mul(subjectFeePercentage).div(ether(1));
               const expectedWbtcPositionUnits = preciseDiv(currentWbtcAmount.add(expectedWbtcOut).sub(protocolFee), totalSupply);
 
               const wethPositionUnits = await subjectCKToken.getDefaultPositionRealUnit(setup.weth.address);
@@ -1565,14 +1569,14 @@ describe("GeneralIndexModule", () => {
 
               const wbtcBalance = await setup.wbtc.balanceOf(feeRecipient);
 
-              const protocolFee = expectedWbtcOut.mul(feePercentage).div(ether(1));
+              const protocolFee = expectedWbtcOut.mul(subjectFeePercentage).div(ether(1));
               const expectedWbtcBalance = beforeWbtcBalance.add(protocolFee);
 
               expect(wbtcBalance).to.eq(expectedWbtcBalance);
             });
 
             it("emits the correct TradeExecuted event", async () => {
-              const protocolFee = expectedWbtcOut.mul(feePercentage).div(ether(1));
+              const protocolFee = expectedWbtcOut.mul(subjectFeePercentage).div(ether(1));
               await expect(subject()).to.be.emit(indexModule, "TradeExecuted").withArgs(
                 subjectCKToken.address,
                 setup.weth.address,
@@ -1584,7 +1588,38 @@ describe("GeneralIndexModule", () => {
                 protocolFee,
               );
             });
+
+            describe("when the prototol fee percentage is 100", async () => {
+              beforeEach(async () => {
+                subjectFeePercentage = ether(100);
+                await setup.controller.editFee(
+                  indexModule.address,
+                  ZERO, // Fee type on trade function denoted as 0
+                  subjectFeePercentage,
+                );
+              });
+
+              it("should revert", async () => {
+                await expect(subject()).to.be.revertedWith("transfer amount exceeds balance");
+              });
+            });
+
+            describe("when the prototol fee percentage is MAX_UINT_256", async () => {
+              beforeEach(async () => {
+                subjectFeePercentage = ether(100);
+                await setup.controller.editFee(
+                  indexModule.address,
+                  ZERO, // Fee type on trade function denoted as 0
+                  subjectFeePercentage,
+                );
+              });
+
+              it("should revert", async () => {
+                await expect(subject()).to.be.revertedWith("transfer amount exceeds balance");
+              });
+            });
           });
+
 
           describe("when exchange returns amount less than subjectMinComponentReceived", async () => {
             beforeEach(async () => {
@@ -1629,6 +1664,24 @@ describe("GeneralIndexModule", () => {
 
             it("should revert", async () => {
               await expect(subject()).to.be.revertedWith("Component not part of rebalance");
+            });
+          });
+
+          describe("when there are external positions for a component", async () => {
+            beforeEach(async () => {
+              await subjectCKToken
+                .connect(positionModule.wallet)
+                .addExternalPositionModule(subjectComponent, positionModule.address);
+            });
+
+            afterEach(async () => {
+              await subjectCKToken
+                .connect(positionModule.wallet)
+                .removeExternalPositionModule(subjectComponent, positionModule.address);
+            });
+
+            it("should revert", async () => {
+              await expect(subject()).to.be.revertedWith("External positions not allowed");
             });
           });
 
@@ -2051,6 +2104,8 @@ describe("GeneralIndexModule", () => {
     });
 
     describe("#raiseAssetTargets", async () => {
+      let subjectRaiseTargetPercentage: BigNumber;
+
       before(async () => {
         // current units [ether(86.9565217), bitcoin(.01111111), ether(100)]
         oldTargetUnits = [ether(60.869565), bitcoin(.015), ether(50)];
@@ -2073,7 +2128,7 @@ describe("GeneralIndexModule", () => {
           await indexModule.connect(trader.wallet).trade(subjectCKToken.address, setup.wbtc.address, MAX_UINT_256);
         }
 
-        await indexModule.setRaiseTargetPercentage(subjectCKToken.address, ether(.0025));
+        await indexModule.setRaiseTargetPercentage(subjectCKToken.address, subjectRaiseTargetPercentage);
       };
 
       async function subject(): Promise<ContractTransaction> {
@@ -2088,8 +2143,9 @@ describe("GeneralIndexModule", () => {
       describe("with default target units", () => {
         beforeEach(async () => {
           initialializeSubjectVariables();
+          subjectRaiseTargetPercentage = ether(0.0025);
+          await startRebalance();
         });
-        cacheBeforeEach(startRebalance);
 
         it("the position units and lastTradeTimestamp should be set as expected", async () => {
           const prePositionMultiplier = (await indexModule.rebalanceInfo(subjectCKToken.address)).positionMultiplier;
@@ -2098,7 +2154,7 @@ describe("GeneralIndexModule", () => {
 
           const expectedPositionMultiplier = preciseDiv(
             prePositionMultiplier,
-            PRECISE_UNIT.add(ether(.0025))
+            PRECISE_UNIT.add(subjectRaiseTargetPercentage),
           );
 
           const positionMultiplier = (await indexModule.rebalanceInfo(subjectCKToken.address)).positionMultiplier;
@@ -2131,26 +2187,47 @@ describe("GeneralIndexModule", () => {
         });
       });
 
-      describe("when the position multiplier is less than 1", () => {
+      describe("when the raiseTargetPercentage is the lowest valid decimal (1e-6)", () => {
         beforeEach(async () => {
           initialializeSubjectVariables();
-
-          await startRebalance(true, true);
+          subjectRaiseTargetPercentage = ether(0.000001);
+          await startRebalance();
         });
 
-        it("the position units and lastTradeTimestamp should be set as expected", async () => {
-          const prePositionMultiplier = (await indexModule.rebalanceInfo(subjectCKToken.address)).positionMultiplier;
+        afterEach(() => {
+          subjectRaiseTargetPercentage = ether(0.0025);
+        });
+
+        it("the position multiplier should be set as expected", async () => {
+          const prePositionMultiplier = (await indexModule.rebalanceInfo(subjectCKToken.address))
+            .positionMultiplier;
 
           await subject();
 
           const expectedPositionMultiplier = preciseDiv(
             prePositionMultiplier,
-            PRECISE_UNIT.add(ether(.0025))
+            PRECISE_UNIT.add(subjectRaiseTargetPercentage),
           );
 
-          const positionMultiplier = (await indexModule.rebalanceInfo(subjectCKToken.address)).positionMultiplier;
-
+          const positionMultiplier = (await indexModule.rebalanceInfo(subjectCKToken.address))
+            .positionMultiplier;
           expect(positionMultiplier).to.eq(expectedPositionMultiplier);
+        });
+      });
+
+      describe("when the raiseTargetPercentage is MAX_UINT_256", () => {
+        beforeEach(async () => {
+          initialializeSubjectVariables();
+          subjectRaiseTargetPercentage = MAX_UINT_256;
+          await startRebalance();
+        });
+
+        afterEach(() => {
+          subjectRaiseTargetPercentage = ether(0.0025);
+        });
+
+        it("it should revert", async () => {
+          await expect(subject()).to.be.revertedWith("addition overflow");
         });
       });
 

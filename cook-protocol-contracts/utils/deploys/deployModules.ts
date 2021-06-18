@@ -71,8 +71,8 @@ export default class DeployModules {
     return await new BasicIssuanceModule__factory(this._deployerSigner).attach(basicIssuanceModule);
   }
 
-  public async deployBatchIssuanceModule(controller: Address, weth: Address): Promise<BatchIssuanceModule> {
-    return await new BatchIssuanceModule__factory(this._deployerSigner).deploy(controller, weth);
+  public async deployBatchIssuanceModule(controller: Address, weth: Address, basicIssuanceModule: Address): Promise<BatchIssuanceModule> {
+    return await new BatchIssuanceModule__factory(this._deployerSigner).deploy(controller, weth, basicIssuanceModule);
   }
 
   public async deployStreamingFeeModule(controller: Address): Promise<StreamingFeeModule> {

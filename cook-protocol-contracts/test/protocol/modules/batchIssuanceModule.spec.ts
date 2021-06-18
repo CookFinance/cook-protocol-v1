@@ -5,9 +5,9 @@ import { ContractTransaction } from "ethers";
 import { Address, BatchIssuanceSetting, StreamingFeeState } from "@utils/types";
 import { Account } from "@utils/test/types";
 import { ONE, TWO, THREE, ZERO, ADDRESS_ZERO, MAX_UINT_256 } from "@utils/constants";
-import { BatchIssuanceHookMock, BatchIssuanceModule, CKToken, UniswapV2IndexExchangeAdapter } from "@utils/contracts";
+import { BasicIssuanceModule, BatchIssuanceModule, CKToken, UniswapV2IndexExchangeAdapter } from "@utils/contracts";
 import DeployHelper from "@utils/deploys";
-import { bitcoin, ether, preciseMul, usdc } from "@utils/index";
+import { bitcoin, ether } from "@utils/index";
 import {
   getAccounts,
   getRandomAddress,
@@ -24,7 +24,6 @@ const expect = getWaffleExpect();
 describe("BatchIssuanceModule", () => {
   let owner: Account;
   let feeRecipient: Account;
-  let recipient: Account;
   let deployer: DeployHelper;
 
   let setup: SystemFixture;
@@ -38,7 +37,6 @@ describe("BatchIssuanceModule", () => {
 
   let batchIssuanceModule: BatchIssuanceModule;
   let batchIssuanceSetting: BatchIssuanceSetting;
-  let batchIssuanceHook: Address;
 
   let ckComponents: Address[];
   let ckUnits: BigNumber[];
@@ -49,7 +47,6 @@ describe("BatchIssuanceModule", () => {
     [
       owner,
       feeRecipient,
-      recipient,
     ] = await getAccounts();
 
     deployer = new DeployHelper(owner.wallet);
@@ -67,7 +64,11 @@ describe("BatchIssuanceModule", () => {
     sushiswapAdapterName = "SUSHISWAP";
     uniswapAdapterName = "UNISWAP";
 
-    batchIssuanceModule = await deployer.modules.deployBatchIssuanceModule(setup.controller.address, setup.weth.address);
+    batchIssuanceModule = await deployer.modules.deployBatchIssuanceModule(
+      setup.controller.address,
+      setup.weth.address,
+      setup.issuanceModule.address,
+    );
     await setup.controller.addModule(batchIssuanceModule.address);
 
     await setup.integrationRegistry.batchAddIntegration(
@@ -130,12 +131,8 @@ describe("BatchIssuanceModule", () => {
       minCKTokenSupply: ether(5),
     } as BatchIssuanceSetting;
 
-    batchIssuanceHook = ADDRESS_ZERO;
-
     await batchIssuanceModule.connect(owner.wallet).initialize(
       ckToken.address,
-      setup.issuanceModule.address,
-      batchIssuanceHook,
       batchIssuanceSetting,
       roundInputCap
     );
@@ -155,14 +152,20 @@ describe("BatchIssuanceModule", () => {
   describe("#constructor", async () => {
     let subjectController: Address;
     let subjectWETH: Address;
+    let subjectBasicIssuanceModule: Address;
 
     beforeEach(async () => {
       subjectController = setup.controller.address;
       subjectWETH = setup.weth.address;
+      subjectBasicIssuanceModule = setup.issuanceModule.address;
     });
 
     async function subject(): Promise<BatchIssuanceModule> {
-      return deployer.modules.deployBatchIssuanceModule(subjectController, subjectWETH);
+      return deployer.modules.deployBatchIssuanceModule(
+        subjectController,
+        subjectWETH,
+        subjectBasicIssuanceModule
+      );
     }
 
     it("should set the correct controller", async () => {
@@ -178,90 +181,125 @@ describe("BatchIssuanceModule", () => {
       const weth = await batchIssuanceModule.weth();
       expect(weth).to.eq(subjectWETH);
     });
+
+    it("should set the correct basicIssuanceModule", async () => {
+      const batchIssuanceModule = await subject();
+
+      const basicIssuanceModule = await batchIssuanceModule.basicIssuanceModule();
+      expect(basicIssuanceModule).to.eq(subjectBasicIssuanceModule);
+    });
   });
 
   describe("#initialize", async () => {
-    let ckToken: CKToken;
-    let batchIssuanceHook: Address;
-    let basicIssuanceModule: Address;
-    let roundInputCap: BigNumber;
+    let batchIssuanceModule_: BatchIssuanceModule;
+    let ckToken_: CKToken;
+    let roundInputCap_: BigNumber;
 
-    let managerFeeRecipient: Address;
-    let managerFees: [BigNumberish, BigNumberish];
-    let maxManagerFee: BigNumber;
-    let minCKTokenSupply: BigNumber;
+    let managerFeeRecipient_: Address;
+    let managerFees_: [BigNumberish, BigNumberish];
+    let maxManagerFee_: BigNumber;
+    let minCKTokenSupply_: BigNumber;
 
+    let basicIssuanceModule_: BasicIssuanceModule;
     let subjectBatchIssuanceSetting: BatchIssuanceSetting;
     let subjectCKToken: Address;
     let subjectCaller: Account;
 
     cacheBeforeEach(async () => {
-      ckToken = await setup.createCKToken(
-        [setup.weth.address],
-        [ether(1)],
-        [batchIssuanceModule.address]
-      );
-
-      batchIssuanceHook = await getRandomAddress();
-      basicIssuanceModule = await getRandomAddress();
-
-      managerFeeRecipient = feeRecipient.address;
+      managerFeeRecipient_ = feeRecipient.address;
       // Set manager issue fee to 0.1% and redeem to 0.2%
-      managerFees = [ether(0.001), ether(0.002)];
+      managerFees_ = [ether(0.001), ether(0.002)];
       // Set max managerFee to 2%
-      maxManagerFee = ether(0.02);
+      maxManagerFee_ = ether(0.02);
       // Set min CKToken supply to 100 units
-      minCKTokenSupply = ether(100);
+      minCKTokenSupply_ = ether(100);
       // Set round cap limit
-      roundInputCap = ether(50);
+      roundInputCap_ = ether(50);
     });
 
     beforeEach(async () => {
-      subjectCKToken = ckToken.address;
+      basicIssuanceModule_ = await deployer.modules.deployBasicIssuanceModule(setup.controller.address);
+      await setup.controller.addModule(basicIssuanceModule_.address);
+
+      batchIssuanceModule_ = await deployer.modules.deployBatchIssuanceModule(
+        setup.controller.address,
+        setup.weth.address,
+        basicIssuanceModule_.address,
+      );
+      await setup.controller.addModule(batchIssuanceModule_.address);
+
+      ckToken_ = await setup.createCKToken(
+        [setup.weth.address],
+        [ether(1)],
+        [basicIssuanceModule_.address, batchIssuanceModule_.address]
+      );
+
+      basicIssuanceModule_.initialize(ckToken_.address, ADDRESS_ZERO);
+
+      subjectCKToken = ckToken_.address;
       subjectBatchIssuanceSetting = {
-        feeRecipient: managerFeeRecipient,
-        managerFees,
-        maxManagerFee,
-        minCKTokenSupply,
+        feeRecipient: managerFeeRecipient_,
+        managerFees: managerFees_,
+        maxManagerFee: maxManagerFee_,
+        minCKTokenSupply: minCKTokenSupply_,
       } as BatchIssuanceSetting;
       subjectCaller = owner;
     });
 
     async function subject(): Promise<any> {
-      return batchIssuanceModule.connect(subjectCaller.wallet).initialize(
+      return batchIssuanceModule_.connect(subjectCaller.wallet).initialize(
         subjectCKToken,
-        basicIssuanceModule,
-        batchIssuanceHook,
         subjectBatchIssuanceSetting,
-        roundInputCap
+        roundInputCap_
       );
     }
 
     it("should set the correct batch issuance settings", async () => {
       await subject();
 
-      const _batchIssuanceSetting: any = await batchIssuanceModule.batchIssuanceSetting();
-      const _basicIssuanceModule: Address = await batchIssuanceModule.basicIssuanceModule();
-      const _batchIssuanceHook: Address = await batchIssuanceModule.batchIssuanceHook();
-      const _roundInputCap: BigNumber = await batchIssuanceModule.roundInputCap();
-      const _managerIssueFee = await batchIssuanceModule.getManagerFee(ZERO);
-      const _managerRedeemFee = await batchIssuanceModule.getManagerFee(ONE);
+      const _batchIssuanceSetting: any = await batchIssuanceModule_.getBatchIssuanceSetting(subjectCKToken);
+      const _roundInputCap: BigNumber = await batchIssuanceModule_.getRoundInputCap(subjectCKToken);
+      const _managerIssueFee = await batchIssuanceModule_.getManagerFee(subjectCKToken, ZERO);
+      const _managerRedeemFee = await batchIssuanceModule_.getManagerFee(subjectCKToken, ONE);
 
-      expect(_basicIssuanceModule).to.eq(basicIssuanceModule);
-      expect(_batchIssuanceHook).to.eq(batchIssuanceHook);
-      expect(_roundInputCap).to.eq(roundInputCap);
-      expect(_managerIssueFee).to.eq(managerFees[0]);
-      expect(_managerRedeemFee).to.eq(managerFees[1]);
-      expect(_batchIssuanceSetting.feeRecipient).to.eq(managerFeeRecipient);
-      expect(_batchIssuanceSetting.maxManagerFee).to.eq(maxManagerFee);
-      expect(_batchIssuanceSetting.minCKTokenSupply).to.eq(minCKTokenSupply);
+      expect(_roundInputCap).to.eq(roundInputCap_);
+      expect(_managerIssueFee).to.eq(managerFees_[0]);
+      expect(_managerRedeemFee).to.eq(managerFees_[1]);
+      expect(_batchIssuanceSetting.feeRecipient).to.eq(managerFeeRecipient_);
+      expect(_batchIssuanceSetting.maxManagerFee).to.eq(maxManagerFee_);
+      expect(_batchIssuanceSetting.minCKTokenSupply).to.eq(minCKTokenSupply_);
     });
 
     it("should enable the Module on the CKToken", async () => {
       await subject();
 
-      const isModuleEnabled = await ckToken.isInitializedModule(batchIssuanceModule.address);
+      const isModuleEnabled = await ckToken_.isInitializedModule(batchIssuanceModule_.address);
       expect(isModuleEnabled).to.eq(true);
+    });
+
+    describe("when the basic issuance module is not initialized", async () => {
+      beforeEach(async () => {
+        const subjectBasicIssuanceModule = await getRandomAddress();
+        await setup.controller.addModule(subjectBasicIssuanceModule);
+
+        batchIssuanceModule_ = await deployer.modules.deployBatchIssuanceModule(
+          setup.controller.address,
+          setup.weth.address,
+          subjectBasicIssuanceModule,
+        );
+        await setup.controller.addModule(batchIssuanceModule_.address);
+
+        ckToken_ = await setup.createCKToken(
+          [setup.weth.address],
+          [ether(1)],
+          [subjectBasicIssuanceModule, batchIssuanceModule_.address]
+        );
+        subjectCKToken = ckToken_.address;
+      });
+
+      it("should revert", async () => {
+        await expect(subject()).to.be.revertedWith("BasicIssuanceModule must be initialized");
+      });
     });
 
     describe("when the caller is not the CKToken manager", async () => {
@@ -298,7 +336,7 @@ describe("BatchIssuanceModule", () => {
         const nonEnabledCKToken = await setup.createNonControllerEnabledCKToken(
           [setup.weth.address],
           [ether(1)],
-          [batchIssuanceModule.address]
+          [batchIssuanceModule_.address]
         );
 
         subjectCKToken = nonEnabledCKToken.address;
@@ -373,14 +411,14 @@ describe("BatchIssuanceModule", () => {
         const depositAmount = ether(1);
 
         const inputBalanceBefore = await setup.weth.balanceOf(owner.address);
-        await batchIssuanceModule.deposit(depositAmount);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
         const inputBalanceAfter = await setup.weth.balanceOf(owner.address);
 
-        const userInputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
-        const userRoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
+        const userInputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const userRoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
         const totalInputBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-        const roundsCount = await batchIssuanceModule.getRoundsCount();
-        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(owner.address);
+        const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, owner.address);
 
         expect(inputBalanceAfter).to.eq(inputBalanceBefore.sub(depositAmount));
         expect(userInputBalance).to.eq(depositAmount);
@@ -396,15 +434,15 @@ describe("BatchIssuanceModule", () => {
         const totalDeposit = deposit1Amount.add(deposit2Amount);
 
         const inputBalanceBefore = await setup.weth.balanceOf(owner.address);
-        await batchIssuanceModule.deposit(deposit1Amount);
-        await batchIssuanceModule.deposit(deposit2Amount);
+        await batchIssuanceModule.deposit(ckToken.address, deposit1Amount);
+        await batchIssuanceModule.deposit(ckToken.address, deposit2Amount);
         const inputBalanceAfter = await setup.weth.balanceOf(owner.address);
 
-        const userInputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
-        const userRoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
+        const userInputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const userRoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
         const totalInputBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-        const roundsCount = await batchIssuanceModule.getRoundsCount();
-        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(owner.address);
+        const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, owner.address);
 
         expect(inputBalanceAfter).to.eq(inputBalanceBefore.sub(totalDeposit));
         expect(userInputBalance).to.eq(totalDeposit);
@@ -428,18 +466,18 @@ describe("BatchIssuanceModule", () => {
 
         const input1BalanceBefore = await setup.weth.balanceOf(account1.address);
         const input2BalanceBefore = await setup.weth.balanceOf(account2.address);
-        await batchIssuanceModule.connect(account1.wallet).deposit(deposit1Amount);
-        await batchIssuanceModule.connect(account2.wallet).deposit(deposit2Amount);
+        await batchIssuanceModule.connect(account1.wallet).deposit(ckToken.address, deposit1Amount);
+        await batchIssuanceModule.connect(account2.wallet).deposit(ckToken.address, deposit2Amount);
         const input1BalanceAfter = await setup.weth.balanceOf(account1.address);
         const input2BalanceAfter = await setup.weth.balanceOf(account2.address);
 
-        const user1InputBalance = await batchIssuanceModule.inputBalanceOf(account1.address);
-        const user2InputBalance = await batchIssuanceModule.inputBalanceOf(account2.address);
-        const user1RoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, account1.address);
-        const user2RoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, account2.address);
+        const user1InputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, account1.address);
+        const user2InputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, account2.address);
+        const user1RoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, account1.address);
+        const user2RoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, account2.address);
         const totalInputTokenBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-        const roundsCount = await batchIssuanceModule.getRoundsCount();
-        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(account1.address);
+        const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, account1.address);
 
         expect(input1BalanceAfter).to.eq(input1BalanceBefore.sub(deposit1Amount));
         expect(input2BalanceAfter).to.eq(input2BalanceBefore.sub(deposit2Amount));
@@ -456,15 +494,15 @@ describe("BatchIssuanceModule", () => {
         const depositAmount = roundInputCap.mul(2);
 
         const inputBalanceBefore = await setup.weth.balanceOf(owner.address);
-        await batchIssuanceModule.deposit(depositAmount);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
         const inputBalanceAfter = await setup.weth.balanceOf(owner.address);
 
-        const userInputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
-        const userRound0InputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
-        const userRound1InputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
+        const userInputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const userRound0InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+        const userRound1InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
         const totalInputTokenBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-        const roundsCount = await batchIssuanceModule.getRoundsCount();
-        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(owner.address);
+        const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, owner.address);
 
         expect(inputBalanceAfter).to.eq(inputBalanceBefore.sub(depositAmount));
         expect(userInputBalance).to.eq(depositAmount);
@@ -477,25 +515,26 @@ describe("BatchIssuanceModule", () => {
 
       describe("when the current round is already partially baked", async () => {
         beforeEach(async () => {
-          await batchIssuanceModule.deposit(ether(1));
+          await batchIssuanceModule.deposit(ckToken.address, ether(1));
           await batchIssuanceModule.connect(owner.wallet).setExchanges(
+            ckToken.address,
             ckComponents,
             [uniswapAdapterName, sushiswapAdapterName]
             );
-          await batchIssuanceModule.batchIssue([0]);
+          await batchIssuanceModule.batchIssue(ckToken.address, [0]);
         });
 
         it("should deposit create a new round", async() => {
           const depositAmount = ether("1");
 
-          await batchIssuanceModule.deposit(depositAmount);
+          await batchIssuanceModule.deposit(ckToken.address, depositAmount);
 
-          const userInputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
-          const userRound0InputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
-          const userRound1InputBalance = await batchIssuanceModule.roundInputBalanceOf(1, owner.address);
+          const userInputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+          const userRound0InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+          const userRound1InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 1, owner.address);
           const totalInputTokenBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-          const roundsCount = await batchIssuanceModule.getRoundsCount();
-          const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(owner.address);
+          const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+          const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, owner.address);
 
           expect(userInputBalance).to.eq(depositAmount);
           expect(userRound0InputBalance).to.eq(0);
@@ -514,13 +553,13 @@ describe("BatchIssuanceModule", () => {
       it("should deposit 1 eth", async() => {
         const depositAmount = ether(1);
 
-        await batchIssuanceModule.depositEth({value: depositAmount});
+        await batchIssuanceModule.depositEth(ckToken.address, {value: depositAmount});
 
-        const userInputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
-        const userRoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
+        const userInputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const userRoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
         const totalInputBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-        const roundsCount = await batchIssuanceModule.getRoundsCount();
-        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(owner.address);
+        const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, owner.address);
 
         expect(userInputBalance).to.eq(depositAmount);
         expect(userRoundInputBalance).to.eq(depositAmount);
@@ -534,14 +573,14 @@ describe("BatchIssuanceModule", () => {
         const deposit2Amount = ether(3);
         const totalDeposit = deposit1Amount.add(deposit2Amount);
 
-        await batchIssuanceModule.depositEth({ value: deposit1Amount });
-        await batchIssuanceModule.depositEth({ value: deposit2Amount });
+        await batchIssuanceModule.depositEth(ckToken.address, { value: deposit1Amount });
+        await batchIssuanceModule.depositEth(ckToken.address, { value: deposit2Amount });
 
-        const userInputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
-        const userRoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
+        const userInputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const userRoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
         const totalInputBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-        const roundsCount = await batchIssuanceModule.getRoundsCount();
-        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(owner.address);
+        const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, owner.address);
 
         expect(userInputBalance).to.eq(totalDeposit);
         expect(userRoundInputBalance).to.eq(totalDeposit);
@@ -558,16 +597,16 @@ describe("BatchIssuanceModule", () => {
         const account1 = owner;
         const account2 = feeRecipient;
 
-        await batchIssuanceModule.connect(account1.wallet).depositEth({ value: deposit1Amount });
-        await batchIssuanceModule.connect(account2.wallet).depositEth({ value:  deposit2Amount });
+        await batchIssuanceModule.connect(account1.wallet).depositEth(ckToken.address, { value: deposit1Amount });
+        await batchIssuanceModule.connect(account2.wallet).depositEth(ckToken.address, { value:  deposit2Amount });
 
-        const user1InputBalance = await batchIssuanceModule.inputBalanceOf(account1.address);
-        const user2InputBalance = await batchIssuanceModule.inputBalanceOf(account2.address);
-        const user1RoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, account1.address);
-        const user2RoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, account2.address);
+        const user1InputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, account1.address);
+        const user2InputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, account2.address);
+        const user1RoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, account1.address);
+        const user2RoundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, account2.address);
         const totalInputTokenBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-        const roundsCount = await batchIssuanceModule.getRoundsCount();
-        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(account1.address);
+        const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, account1.address);
 
         expect(user1InputBalance).to.eq(deposit1Amount);
         expect(user2InputBalance).to.eq(deposit2Amount);
@@ -581,14 +620,14 @@ describe("BatchIssuanceModule", () => {
       it("should generate additional rounds", async() => {
         const depositAmount = roundInputCap.mul(2);
 
-        await batchIssuanceModule.depositEth({ value: depositAmount });
+        await batchIssuanceModule.depositEth(ckToken.address, { value: depositAmount });
 
-        const userInputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
-        const userRound0InputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
-        const userRound1InputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
+        const userInputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const userRound0InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+        const userRound1InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
         const totalInputTokenBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-        const roundsCount = await batchIssuanceModule.getRoundsCount();
-        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(owner.address);
+        const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+        const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, owner.address);
 
         expect(userInputBalance).to.eq(depositAmount);
         expect(userRound0InputBalance).to.eq(depositAmount.div(2));
@@ -600,25 +639,26 @@ describe("BatchIssuanceModule", () => {
 
       describe("when the current round is already partially baked", async () => {
         beforeEach(async () => {
-          await batchIssuanceModule.depositEth({ value: ether(1) });
+          await batchIssuanceModule.depositEth(ckToken.address, { value: ether(1) });
           await batchIssuanceModule.connect(owner.wallet).setExchanges(
+            ckToken.address,
             ckComponents,
             [uniswapAdapterName, sushiswapAdapterName]
             );
-          await batchIssuanceModule.batchIssue([0]);
+          await batchIssuanceModule.batchIssue(ckToken.address, [0]);
         });
 
         it("should deposit create a new round", async() => {
           const depositAmount = ether("1");
 
-          await batchIssuanceModule.depositEth({ value: depositAmount });
+          await batchIssuanceModule.depositEth(ckToken.address, { value: depositAmount });
 
-          const userInputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
-          const userRound0InputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
-          const userRound1InputBalance = await batchIssuanceModule.roundInputBalanceOf(1, owner.address);
+          const userInputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+          const userRound0InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+          const userRound1InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 1, owner.address);
           const totalInputTokenBalance = await setup.weth.balanceOf(batchIssuanceModule.address);
-          const roundsCount = await batchIssuanceModule.getRoundsCount();
-          const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(owner.address);
+          const roundsCount = await batchIssuanceModule.getRoundsCount(ckToken.address);
+          const userRoundsCount = await batchIssuanceModule.getUserRoundsCount(ckToken.address, owner.address);
 
           expect(userInputBalance).to.eq(depositAmount);
           expect(userRound0InputBalance).to.eq(0);
@@ -635,6 +675,7 @@ describe("BatchIssuanceModule", () => {
     beforeEach(async () => {
       await setup.weth.approve(batchIssuanceModule.address, MAX_UINT_256);
       await batchIssuanceModule.connect(owner.wallet).setExchanges(
+        ckToken.address,
         ckComponents,
         [uniswapAdapterName, sushiswapAdapterName]
         );
@@ -643,13 +684,13 @@ describe("BatchIssuanceModule", () => {
     it("should issue a single round", async() => {
       const depositAmount = ether(1);
       const expectedOutput = ether("1.181023319232159166");
-      await batchIssuanceModule.deposit(depositAmount);
-      await batchIssuanceModule.batchIssue([0]);
+      await batchIssuanceModule.deposit(ckToken.address, depositAmount);
+      await batchIssuanceModule.batchIssue(ckToken.address, [0]);
 
-      const roundOutputBalance = await batchIssuanceModule.roundOutputBalanceOf(0, owner.address);
-      const outputBalance = await batchIssuanceModule.outputBalanceOf(owner.address);
-      const roundInputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
-      const inputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
+      const roundOutputBalance = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 0, owner.address);
+      const outputBalance = await batchIssuanceModule.outputBalanceOf(ckToken.address, owner.address);
+      const roundInputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+      const inputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
 
       expect(roundOutputBalance).to.eq(expectedOutput);
       expect(outputBalance).to.eq(expectedOutput);
@@ -660,15 +701,15 @@ describe("BatchIssuanceModule", () => {
     it("should issue multi rounds", async() => {
       const depositAmount = roundInputCap.mul(2);
       const expectedOutput = ether("23.620466384643183332");
-      await batchIssuanceModule.deposit(depositAmount);
-      await batchIssuanceModule.batchIssue([0, 1]);
+      await batchIssuanceModule.deposit(ckToken.address, depositAmount);
+      await batchIssuanceModule.batchIssue(ckToken.address, [0, 1]);
 
-      const round0OutputBalance = await batchIssuanceModule.roundOutputBalanceOf(0, owner.address);
-      const round1OutputBalance = await batchIssuanceModule.roundOutputBalanceOf(1, owner.address);
-      const outputBalance = await batchIssuanceModule.outputBalanceOf(owner.address);
-      const round0InputBalance = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
-      const round1InputBalance = await batchIssuanceModule.roundInputBalanceOf(1, owner.address);
-      const inputBalance = await batchIssuanceModule.inputBalanceOf(owner.address);
+      const round0OutputBalance = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 0, owner.address);
+      const round1OutputBalance = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 1, owner.address);
+      const outputBalance = await batchIssuanceModule.outputBalanceOf(ckToken.address, owner.address);
+      const round0InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+      const round1InputBalance = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 1, owner.address);
+      const inputBalance = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
 
       expect(round0OutputBalance).to.eq(expectedOutput.div(2));
       expect(round1OutputBalance).to.eq(expectedOutput.div(2));
@@ -680,74 +721,321 @@ describe("BatchIssuanceModule", () => {
 
     it("issue the same round twice should revert", async() => {
         const depositAmount = ether(1);
-        await batchIssuanceModule.deposit(depositAmount);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
 
-        await batchIssuanceModule.batchIssue([0]);
-        await expect(batchIssuanceModule.batchIssue([0])).to.be.revertedWith("Quantity must be > 0");
+        await batchIssuanceModule.batchIssue(ckToken.address, [0]);
+        await expect(batchIssuanceModule.batchIssue(ckToken.address, [0])).to.be.revertedWith("Quantity must be > 0");
     });
     it("issue rounds parameter should be ordered", async() => {
         const depositAmount = roundInputCap.mul(4);
-        await batchIssuanceModule.deposit(depositAmount);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
 
-        await expect(batchIssuanceModule.batchIssue([1, 0, 3])).to.be.revertedWith("Rounds out of order");
+        await expect(batchIssuanceModule.batchIssue(ckToken.address, [1, 0, 3])).to.be.revertedWith("Rounds out of order");
     });
   });
 
   describe("#removeModule", async () => {
-    let subjectCaller: Account;
+    let subjectCKToken: Address;
+    let subjectModule: Address;
 
-    beforeEach(async () => {
-      subjectCaller = owner;
+    beforeEach(() => {
+      subjectCKToken = ckToken.address;
+      subjectModule = batchIssuanceModule.address;
     });
 
     async function subject(): Promise<any> {
-      return batchIssuanceModule.connect(subjectCaller.wallet).removeModule();
+      return ckToken.removeModule(subjectModule);
     }
 
-    it("should revert", async () => {
-      await expect(subject()).to.be.revertedWith("The BatchIssuanceModule module cannot be removed");
+    it("should delete all tradeExecutionInfo", async () => {
+      await subject();
+
+      for (let index = 0; index < ckComponents.length; index++) {
+        const component = ckComponents[index];
+        const tradeExecutionParam = await batchIssuanceModule.getTradeExecutionParam(subjectCKToken, component);
+        console.log("tradeExecutionParam: ", tradeExecutionParam);
+        expect(tradeExecutionParam.exchangeName).to.eq("");
+        expect(tradeExecutionParam.exchangeData).to.eq("0x");
+      }
+    });
+
+    it("should delete the batch issuance settings", async () => {
+      await subject();
+
+      const batchIssuanceSetting: any = await batchIssuanceModule.getBatchIssuanceSetting(subjectCKToken);
+      const managerIssueFee = await batchIssuanceModule.getManagerFee(subjectCKToken, ZERO);
+      const managerRedeemFee = await batchIssuanceModule.getManagerFee(subjectCKToken, ONE);
+
+      expect(batchIssuanceSetting.feeRecipient).to.eq(ADDRESS_ZERO);
+      expect(managerIssueFee).to.eq(ZERO);
+      expect(managerRedeemFee).to.eq(ZERO);
+      expect(batchIssuanceSetting.maxManagerFee).to.eq(ZERO);
+      expect(batchIssuanceSetting.minCKTokenSupply).to.eq(ZERO);
+    });
+  });
+
+  describe("#withdraw", async () => {
+    beforeEach(async () => {
+      await setup.weth.approve(batchIssuanceModule.address, MAX_UINT_256);
+      await batchIssuanceModule.connect(owner.wallet).setExchanges(
+        ckToken.address,
+        ckComponents,
+        [uniswapAdapterName, sushiswapAdapterName]
+        );
+    });
+
+    describe("when fully baked", async () => {
+      it("should withdraw simply", async () => {
+        const depositAmount = ether(1);
+        const expectedOutput = ether("11.181023319232159166");
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
+
+        await batchIssuanceModule.batchIssue(ckToken.address, [0]);
+
+        batchIssuanceModule.withdraw(ckToken.address, MAX_UINT_256);
+
+        const outputBalance = await batchIssuanceModule.outputBalanceOf(ckToken.address, owner.address);
+        const roundOutputBalance = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 0, owner.address);
+        const outputTokenBalance = await ckToken.balanceOf(owner.address);
+
+        expect(outputBalance).to.eq(0);
+        expect(roundOutputBalance).to.eq(0);
+        expect(outputTokenBalance).to.eq(expectedOutput);
+      });
+    });
+
+    describe("when not baked at all", async () => {
+      it("should withdraw simply", async () => {
+        const depositAmount = ether(1);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
+
+        const inputTokenBalanceBefore = await setup.weth.balanceOf(owner.address);
+        const outputTokenBalanceBefore = await ckToken.balanceOf(owner.address);
+
+        await batchIssuanceModule.withdraw(ckToken.address, MAX_UINT_256);
+
+        const inputBalanceAfter = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const roundInputBalanceAfter = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+        const inputTokenBalanceAfter = await setup.weth.balanceOf(owner.address);
+        const outputBalanceAfter = await batchIssuanceModule.outputBalanceOf(ckToken.address, owner.address);
+        const roundOutputBalanceAfter = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 0, owner.address);
+        const outputTokenBalanceAfter = await ckToken.balanceOf(owner.address);
+
+        expect(inputBalanceAfter).to.eq(0);
+        expect(roundInputBalanceAfter).to.eq(0);
+        expect(inputTokenBalanceAfter).to.eq(inputTokenBalanceBefore.add(depositAmount));
+        expect(outputBalanceAfter).to.eq(0);
+        expect(roundOutputBalanceAfter).to.eq(0);
+        expect(outputTokenBalanceAfter).to.eq(outputTokenBalanceBefore);
+      });
+    });
+
+    describe("when baked in 3 rounds", async () => {
+      it("should withdraw", async () => {
+        const depositAmount = roundInputCap.mul(3);
+        const expectedOutput = ether("35.430699576964774998");
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
+        await batchIssuanceModule.batchIssue(ckToken.address, [0, 1, 2]);
+
+        const inputTokenBalanceBefore = await setup.weth.balanceOf(owner.address);
+        const outputTokenBalanceBefore = await ckToken.balanceOf(owner.address);
+
+        await batchIssuanceModule.withdraw(ckToken.address, MAX_UINT_256);
+
+        const inputBalanceAfter = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const roundInputBalanceAfter = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+        const inputTokenBalanceAfter = await setup.weth.balanceOf(owner.address);
+        const outputBalanceAfter = await batchIssuanceModule.outputBalanceOf(ckToken.address, owner.address);
+        const roundOutputBalanceAfter = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 0, owner.address);
+        const outputTokenBalanceAfter = await ckToken.balanceOf(owner.address);
+
+        expect(inputBalanceAfter).to.eq(0);
+        expect(roundInputBalanceAfter).to.eq(0);
+        expect(inputTokenBalanceAfter).to.eq(inputTokenBalanceBefore);
+        expect(outputBalanceAfter).to.eq(0);
+        expect(roundOutputBalanceAfter).to.eq(0);
+        expect(outputTokenBalanceAfter).to.eq(outputTokenBalanceBefore.add(expectedOutput));
+      });
+    });
+
+    describe("when backed multiple users deposits", async () => {
+      it("should withdraw math accuracy", async() => {
+        const account2 = feeRecipient;
+
+        await batchIssuanceModule.deposit(ckToken.address, ether(2)); // deposit 2ETH
+        await batchIssuanceModule.connect(account2.wallet).depositEth(ckToken.address, { value:  ether(1) }); // deposit 1ETH
+
+        await batchIssuanceModule.batchIssue(ckToken.address, [0]);
+
+        const expectedOutput2 = await batchIssuanceModule.outputBalanceOf(ckToken.address, account2.address);
+
+        await batchIssuanceModule.connect(account2.wallet).withdraw(ckToken.address, 2);
+        await batchIssuanceModule.withdraw(ckToken.address, 2);
+
+        const outputTokenBalance2 = await ckToken.balanceOf(account2.address);
+        expect(outputTokenBalance2).to.eq(expectedOutput2);
+      });
+    });
+
+    describe("when depositing into a second round from a different address", async () => {
+      it("should withdraw", async() => {
+        const account2 = feeRecipient;
+
+        await batchIssuanceModule.deposit(ckToken.address, roundInputCap.add(1));
+
+        const outputTokenBalanceBefore = await ckToken.balanceOf(account2.address);
+
+        await batchIssuanceModule.connect(account2.wallet).depositEth(ckToken.address, { value:  roundInputCap });
+        await batchIssuanceModule.connect(account2.wallet).withdraw(ckToken.address, MAX_UINT_256);
+
+        const inputBalanceAfter = await batchIssuanceModule.inputBalanceOf(ckToken.address, account2.address);
+        const roundInputBalanceAfter = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 1, account2.address);
+        const outputBalanceAfter = await batchIssuanceModule.outputBalanceOf(ckToken.address, account2.address);
+        const roundOutputBalanceAfter = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 1, account2.address);
+        const outputTokenBalanceAfter = await ckToken.balanceOf(account2.address);
+
+        expect(inputBalanceAfter).to.eq(0);
+        expect(roundInputBalanceAfter).to.eq(0);
+        expect(outputBalanceAfter).to.eq(0);
+        expect(roundOutputBalanceAfter).to.eq(0);
+        expect(outputTokenBalanceAfter).to.eq(outputTokenBalanceBefore);
+      });
+    });
+  });
+
+  describe("#withdrawTo", async () => {
+    beforeEach(async () => {
+      await setup.weth.approve(batchIssuanceModule.address, MAX_UINT_256);
+      await batchIssuanceModule.connect(owner.wallet).setExchanges(
+        ckToken.address,
+        ckComponents,
+        [uniswapAdapterName, sushiswapAdapterName]
+        );
+    });
+
+    describe("when fully baked", async () => {
+      it("should withdraw simply", async () => {
+        const depositAmount = ether(1);
+        const expectedOutput = ether("11.181023319232159166");
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
+
+        await batchIssuanceModule.batchIssue(ckToken.address, [0]);
+
+        batchIssuanceModule.withdrawTo(ckToken.address, owner.address, MAX_UINT_256);
+
+        const outputBalance = await batchIssuanceModule.outputBalanceOf(ckToken.address, owner.address);
+        const roundOutputBalance = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 0, owner.address);
+        const outputTokenBalance = await ckToken.balanceOf(owner.address);
+
+        expect(outputBalance).to.eq(0);
+        expect(roundOutputBalance).to.eq(0);
+        expect(outputTokenBalance).to.eq(expectedOutput);
+      });
+    });
+
+    describe("when not baked at all", async () => {
+      it("should withdraw simply", async () => {
+        const depositAmount = ether(1);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
+
+        const inputTokenBalanceBefore = await setup.weth.balanceOf(owner.address);
+        const outputTokenBalanceBefore = await ckToken.balanceOf(owner.address);
+
+        await batchIssuanceModule.withdrawTo(ckToken.address, owner.address, MAX_UINT_256);
+
+        const inputBalanceAfter = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const roundInputBalanceAfter = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+        const inputTokenBalanceAfter = await setup.weth.balanceOf(owner.address);
+        const outputBalanceAfter = await batchIssuanceModule.outputBalanceOf(ckToken.address, owner.address);
+        const roundOutputBalanceAfter = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 0, owner.address);
+        const outputTokenBalanceAfter = await ckToken.balanceOf(owner.address);
+
+        expect(inputBalanceAfter).to.eq(0);
+        expect(roundInputBalanceAfter).to.eq(0);
+        expect(inputTokenBalanceAfter).to.eq(inputTokenBalanceBefore.add(depositAmount));
+        expect(outputBalanceAfter).to.eq(0);
+        expect(roundOutputBalanceAfter).to.eq(0);
+        expect(outputTokenBalanceAfter).to.eq(outputTokenBalanceBefore);
+      });
+    });
+
+    describe("when baked in 3 rounds", async () => {
+      it("should withdraw", async () => {
+        const depositAmount = roundInputCap.mul(3);
+        const expectedOutput = ether("35.430699576964774998");
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
+        await batchIssuanceModule.batchIssue(ckToken.address, [0, 1, 2]);
+
+        const inputTokenBalanceBefore = await setup.weth.balanceOf(owner.address);
+        const outputTokenBalanceBefore = await ckToken.balanceOf(owner.address);
+
+        await batchIssuanceModule.withdrawTo(ckToken.address, owner.address, MAX_UINT_256);
+
+        const inputBalanceAfter = await batchIssuanceModule.inputBalanceOf(ckToken.address, owner.address);
+        const roundInputBalanceAfter = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 0, owner.address);
+        const inputTokenBalanceAfter = await setup.weth.balanceOf(owner.address);
+        const outputBalanceAfter = await batchIssuanceModule.outputBalanceOf(ckToken.address, owner.address);
+        const roundOutputBalanceAfter = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 0, owner.address);
+        const outputTokenBalanceAfter = await ckToken.balanceOf(owner.address);
+
+        expect(inputBalanceAfter).to.eq(0);
+        expect(roundInputBalanceAfter).to.eq(0);
+        expect(inputTokenBalanceAfter).to.eq(inputTokenBalanceBefore);
+        expect(outputBalanceAfter).to.eq(0);
+        expect(roundOutputBalanceAfter).to.eq(0);
+        expect(outputTokenBalanceAfter).to.eq(outputTokenBalanceBefore.add(expectedOutput));
+      });
+    });
+
+    describe("when backed multiple users deposits", async () => {
+      it("should withdraw math accuracy", async() => {
+        const account2 = feeRecipient;
+
+        await batchIssuanceModule.deposit(ckToken.address, ether(2)); // deposit 2ETH
+        await batchIssuanceModule.connect(account2.wallet).depositEth(ckToken.address, { value:  ether(1) }); // deposit 1ETH
+
+        await batchIssuanceModule.batchIssue(ckToken.address, [0]);
+
+        const expectedOutput2 = await batchIssuanceModule.outputBalanceOf(ckToken.address, account2.address);
+
+        await batchIssuanceModule.connect(account2.wallet).withdrawTo(ckToken.address, account2.address, 2);
+        await batchIssuanceModule.withdraw(ckToken.address, 2);
+
+        const outputTokenBalance2 = await ckToken.balanceOf(account2.address);
+        expect(outputTokenBalance2).to.eq(expectedOutput2);
+      });
+    });
+
+    describe("when depositing into a second round from a different address", async () => {
+      it("should withdraw", async() => {
+        const account2 = feeRecipient;
+
+        await batchIssuanceModule.deposit(ckToken.address, roundInputCap.add(1));
+
+        const outputTokenBalanceBefore = await ckToken.balanceOf(account2.address);
+
+        await batchIssuanceModule.connect(account2.wallet).depositEth(ckToken.address, { value:  roundInputCap });
+        await batchIssuanceModule.connect(account2.wallet).withdrawTo(ckToken.address, account2.address, MAX_UINT_256);
+
+        const inputBalanceAfter = await batchIssuanceModule.inputBalanceOf(ckToken.address, account2.address);
+        const roundInputBalanceAfter = await batchIssuanceModule.roundInputBalanceOf(ckToken.address, 1, account2.address);
+        const outputBalanceAfter = await batchIssuanceModule.outputBalanceOf(ckToken.address, account2.address);
+        const roundOutputBalanceAfter = await batchIssuanceModule.roundOutputBalanceOf(ckToken.address, 1, account2.address);
+        const outputTokenBalanceAfter = await ckToken.balanceOf(account2.address);
+
+        expect(inputBalanceAfter).to.eq(0);
+        expect(roundInputBalanceAfter).to.eq(0);
+        expect(outputBalanceAfter).to.eq(0);
+        expect(roundOutputBalanceAfter).to.eq(0);
+        expect(outputTokenBalanceAfter).to.eq(outputTokenBalanceBefore);
+      });
     });
   });
 
   context("Manager admin functions", async () => {
     let subjectCaller: Account;
 
-    let ckToken: CKToken;
-
     cacheBeforeEach(async () => {
-      ckToken = await setup.createCKToken(
-        [setup.weth.address],
-        [ether(1)],
-        [batchIssuanceModule.address]
-      );
-
-      const batchIssuanceHook = await getRandomAddress();
-      const basicIssuanceModule = await getRandomAddress();
-      const managerFeeRecipient = feeRecipient.address;
-      // Set manager issue fee to 0.1% and redeem to 0.2%
-      const managerFees = [ether(0.001), ether(0.002)] as [BigNumberish, BigNumberish];
-      // Set max managerFee to 2%
-      const maxManagerFee = ether(0.02);
-      // Set min CKToken supply required
-      const minCKTokenSupply = ether(100);
-      // Set round cap limit
-      const roundInputCap = ether(5);
-
-      const batchIssuanceSetting = {
-        feeRecipient: managerFeeRecipient,
-        managerFees,
-        maxManagerFee,
-        minCKTokenSupply,
-      } as BatchIssuanceSetting;
-
-      await batchIssuanceModule.connect(owner.wallet).initialize(
-        ckToken.address,
-        basicIssuanceModule,
-        batchIssuanceHook,
-        batchIssuanceSetting,
-        roundInputCap
-      );
-
       const protocolDirectFee = ether(.02);
       await setup.controller.addFee(batchIssuanceModule.address, TWO, protocolDirectFee);
 
@@ -766,18 +1054,19 @@ describe("BatchIssuanceModule", () => {
       });
 
       async function subject(): Promise<any> {
-        return batchIssuanceModule.connect(subjectCaller.wallet).editManagerFee(subjectManagerFee, subjectFeeIndex);
+        return batchIssuanceModule.connect(subjectCaller.wallet).editManagerFee(ckToken.address, subjectManagerFee, subjectFeeIndex);
       }
 
       it("should edit the manager issue fee", async () => {
         await subject();
-        const managerIssueFee = await batchIssuanceModule.getManagerFee(subjectFeeIndex);
+        const managerIssueFee = await batchIssuanceModule.getManagerFee(ckToken.address, subjectFeeIndex);
 
         expect(managerIssueFee).to.eq(subjectManagerFee);
       });
 
       it("should emit correct ManagerFeeEdited event", async () => {
         await expect(subject()).to.emit(batchIssuanceModule, "ManagerFeeEdited").withArgs(
+          ckToken.address,
           subjectManagerFee,
           subjectFeeIndex
         );
@@ -791,7 +1080,7 @@ describe("BatchIssuanceModule", () => {
 
         it("should edit the manager redeem fee", async () => {
           await subject();
-          const managerRedeemFee = await batchIssuanceModule.getManagerFee(subjectFeeIndex);
+          const managerRedeemFee = await batchIssuanceModule.getManagerFee(ckToken.address, subjectFeeIndex);
 
           expect(managerRedeemFee).to.eq(subjectManagerFee);
         });
@@ -819,17 +1108,18 @@ describe("BatchIssuanceModule", () => {
       });
 
       async function subject(): Promise<any> {
-        return batchIssuanceModule.connect(subjectCaller.wallet).editFeeRecipient(subjectFeeRecipient);
+        return batchIssuanceModule.connect(subjectCaller.wallet).editFeeRecipient(ckToken.address, subjectFeeRecipient);
       }
 
       it("should edit the manager fee recipient", async () => {
         await subject();
-        const batchIssuanceSetting = await batchIssuanceModule.batchIssuanceSetting();
+        const batchIssuanceSetting = await batchIssuanceModule.getBatchIssuanceSetting(ckToken.address);
         expect(batchIssuanceSetting.feeRecipient).to.eq(subjectFeeRecipient);
       });
 
       it("should emit correct FeeRecipientEdited event", async () => {
         await expect(subject()).to.emit(batchIssuanceModule, "FeeRecipientEdited").withArgs(
+          ckToken.address,
           subjectFeeRecipient
         );
       });
@@ -847,35 +1137,6 @@ describe("BatchIssuanceModule", () => {
       });
     });
 
-    describe("#editRoundInputCap", async () => {
-      let subjectRoundInputCap: BigNumber;
-
-      beforeEach(async () => {
-        subjectRoundInputCap = ether(60);
-        subjectCaller = owner;
-      });
-
-      async function subject(): Promise<any> {
-        return batchIssuanceModule.connect(subjectCaller.wallet).editRoundInputCap(subjectRoundInputCap);
-      }
-
-      it("should edit the round input cap", async () => {
-        await subject();
-        const roundInputCap = await batchIssuanceModule.roundInputCap();
-        expect(roundInputCap).to.eq(subjectRoundInputCap);
-      });
-
-      it("should emit correct RoundInputCapEdited event", async () => {
-        const oldRoundInputCap = await batchIssuanceModule.roundInputCap();
-        await expect(subject()).to.emit(batchIssuanceModule, "RoundInputCapEdited").withArgs(
-          oldRoundInputCap,
-          subjectRoundInputCap
-        );
-      });
-
-      shouldRevertIfTheCallerIsNotTheManager(subject);
-    });
-
     describe("#setExchanges", async () => {
       let subjectComponents: Address[];
       let subjectExchanges: string[];
@@ -887,14 +1148,16 @@ describe("BatchIssuanceModule", () => {
       });
 
       async function subject(): Promise<ContractTransaction> {
-        return await batchIssuanceModule.connect(subjectCaller.wallet).setExchanges(subjectComponents, subjectExchanges);
+        return await batchIssuanceModule.connect(subjectCaller.wallet).setExchanges(ckToken.address, subjectComponents, subjectExchanges);
       }
 
       it("should set values correctly", async () => {
         await subject();
 
         for (let i = 0; i < subjectComponents.length; i++) {
-          const exchangeName = (await batchIssuanceModule.tradeExecutionInfo(subjectComponents[i])).exchangeName;
+          const exchangeName = (
+            await batchIssuanceModule.getTradeExecutionParam(ckToken.address, subjectComponents[i])
+          ).exchangeName;
           const expectedExchangeName = subjectExchanges[i];
           expect(exchangeName).to.be.eq(expectedExchangeName);
         }
@@ -976,102 +1239,54 @@ describe("BatchIssuanceModule", () => {
     }
   });
 
-  describe("#withdraw", async () => {
+  describe("Round Functions", async () => {
     beforeEach(async () => {
       await setup.weth.approve(batchIssuanceModule.address, MAX_UINT_256);
       await batchIssuanceModule.connect(owner.wallet).setExchanges(
+        ckToken.address,
         ckComponents,
         [uniswapAdapterName, sushiswapAdapterName]
         );
     });
 
-    describe("when fully baked", async () => {
-      it("should withdraw simply", async () => {
+    describe("when deposit small amount", async () => {
+      it("should have one round", async () => {
         const depositAmount = ether(1);
-        const expectedOutput = ether("11.181023319232159166");
-        await batchIssuanceModule.deposit(depositAmount);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
 
-        await batchIssuanceModule.batchIssue([0]);
+        const currentRound = await batchIssuanceModule.getCurrentRound(ckToken.address);
+        const roundsToBake = await batchIssuanceModule.getRoundsToBake(ckToken.address);
 
-        batchIssuanceModule.withdraw(MAX_UINT_256);
-
-        const outputBalance = await batchIssuanceModule.outputBalanceOf(owner.address);
-        const roundOutputBalance = await batchIssuanceModule.roundOutputBalanceOf(0, owner.address);
-        const outputTokenBalance = await ckToken.balanceOf(owner.address);
-
-        expect(outputBalance).to.eq(0);
-        expect(roundOutputBalance).to.eq(0);
-        expect(outputTokenBalance).to.eq(expectedOutput);
+        expect(currentRound).to.eq(ZERO);
+        expect(roundsToBake).to.eql([ZERO]);
       });
     });
 
-    describe("when not baked at all", async () => {
-      it("should withdraw simply", async () => {
-        const depositAmount = ether(1);
-        await batchIssuanceModule.deposit(depositAmount);
+    describe("when deposit double round cap", async () => {
+      it("should have two rounds", async () => {
+        const depositAmount = roundInputCap.mul(2);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
 
-        const inputTokenBalanceBefore = await setup.weth.balanceOf(owner.address);
-        const outputTokenBalanceBefore = await ckToken.balanceOf(owner.address);
+        const currentRound = await batchIssuanceModule.getCurrentRound(ckToken.address);
+        const roundsToBake = await batchIssuanceModule.getRoundsToBake(ckToken.address);
 
-        await batchIssuanceModule.withdraw(MAX_UINT_256);
-
-        const inputBalanceAfter = await batchIssuanceModule.inputBalanceOf(owner.address);
-        const roundInputBalanceAfter = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
-        const inputTokenBalanceAfter = await setup.weth.balanceOf(owner.address);
-        const outputBalanceAfter = await batchIssuanceModule.outputBalanceOf(owner.address);
-        const roundOutputBalanceAfter = await batchIssuanceModule.roundOutputBalanceOf(0, owner.address);
-        const outputTokenBalanceAfter = await ckToken.balanceOf(owner.address);
-
-        expect(inputBalanceAfter).to.eq(0);
-        expect(roundInputBalanceAfter).to.eq(0);
-        expect(inputTokenBalanceAfter).to.eq(inputTokenBalanceBefore.add(depositAmount));
-        expect(outputBalanceAfter).to.eq(0);
-        expect(roundOutputBalanceAfter).to.eq(0);
-        expect(outputTokenBalanceAfter).to.eq(outputTokenBalanceBefore);
+        expect(currentRound).to.eq(ONE);
+        expect(roundsToBake).to.eql([ZERO, ONE]);
       });
     });
 
-    describe("when baked in 3 rounds", async () => {
-      it("should withdraw", async () => {
-        const depositAmount = roundInputCap.mul(3);
-        const expectedOutput = ether("35.430699576964774998");
-        await batchIssuanceModule.deposit(depositAmount);
-        await batchIssuanceModule.batchIssue([0, 1, 2]);
+    describe("when partially baked", async () => {
+      it("should have correct rounds to be baked", async () => {
+        const depositAmount = roundInputCap.mul(4);
+        await batchIssuanceModule.deposit(ckToken.address, depositAmount);
 
-        const inputTokenBalanceBefore = await setup.weth.balanceOf(owner.address);
-        const outputTokenBalanceBefore = await ckToken.balanceOf(owner.address);
+        await batchIssuanceModule.batchIssue(ckToken.address, [0, 2]);
 
-        await batchIssuanceModule.withdraw(MAX_UINT_256);
+        const currentRound = await batchIssuanceModule.getCurrentRound(ckToken.address);
+        const roundsToBake = await batchIssuanceModule.getRoundsToBake(ckToken.address);
 
-        const inputBalanceAfter = await batchIssuanceModule.inputBalanceOf(owner.address);
-        const roundInputBalanceAfter = await batchIssuanceModule.roundInputBalanceOf(0, owner.address);
-        const inputTokenBalanceAfter = await setup.weth.balanceOf(owner.address);
-        const outputBalanceAfter = await batchIssuanceModule.outputBalanceOf(owner.address);
-        const roundOutputBalanceAfter = await batchIssuanceModule.roundOutputBalanceOf(0, owner.address);
-        const outputTokenBalanceAfter = await ckToken.balanceOf(owner.address);
-
-        expect(inputBalanceAfter).to.eq(0);
-        expect(roundInputBalanceAfter).to.eq(0);
-        expect(inputTokenBalanceAfter).to.eq(inputTokenBalanceBefore);
-        expect(outputBalanceAfter).to.eq(0);
-        expect(roundOutputBalanceAfter).to.eq(0);
-        expect(outputTokenBalanceAfter).to.eq(outputTokenBalanceBefore.add(expectedOutput));
-      });
-    });
-
-    describe("when backed multiple users deposits", async () => {
-      it("Withdraw math accuracy", async() => {
-        const account1 = owner;
-        const account2 = feeRecipient;
-
-        await batchIssuanceModule.deposit(ether(2)); // deposit 2ETH
-        await setup.weth.connect(account2.wallet).approve(batchIssuanceModule.address, MAX_UINT_256);
-        await batchIssuanceModule.connect(account2.wallet).deposit(ether(1)); // deposit 1ETH
-
-        await batchIssuanceModule.batchIssue([0]);
-
-        await batchIssuanceModule.connect(account2.wallet).withdraw(2); // success
-        await batchIssuanceModule.connect(account1.wallet).withdraw(2); // error! revert ERC20: transfer amount exceeds balance
+        expect(currentRound).to.eq(THREE);
+        expect(roundsToBake).to.eql([ONE, THREE]);
       });
     });
   });
