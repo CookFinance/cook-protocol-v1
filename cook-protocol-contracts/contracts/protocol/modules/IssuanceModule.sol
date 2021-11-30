@@ -19,20 +19,28 @@
 pragma solidity 0.6.10;
 pragma experimental "ABIEncoderV2";
 
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { SafeCast } from "@openzeppelin/contracts/utils/SafeCast.sol";
 import { SafeMath } from "@openzeppelin/contracts/math/SafeMath.sol";
 import { SignedSafeMath } from "@openzeppelin/contracts/math/SignedSafeMath.sol";
 
+import { AddressArrayUtils } from "../../lib/AddressArrayUtils.sol";
 import { IController } from "../../interfaces/IController.sol";
 import { IManagerIssuanceHook } from "../../interfaces/IManagerIssuanceHook.sol";
 import { IModuleIssuanceHook } from "../../interfaces/IModuleIssuanceHook.sol";
 import { Invoke } from "../lib/Invoke.sol";
 import { ICKToken } from "../../interfaces/ICKToken.sol";
+import { IWETH } from "../../interfaces/external/IWETH.sol";
+import { IWrapAdapter } from "../../interfaces/IWrapAdapter.sol";
 import { ModuleBase } from "../lib/ModuleBase.sol";
 import { Position } from "../lib/Position.sol";
 import { PreciseUnitMath } from "../../lib/PreciseUnitMath.sol";
+import { IExchangeAdapter } from "../../interfaces/IExchangeAdapter.sol";
+import { ResourceIdentifier } from "../lib/ResourceIdentifier.sol";
+import { IYieldYakStrategyV2 } from "../../interfaces/external/IYieldYakStrategyV2.sol";
 
 /**
  * @title IssuanceModule
@@ -42,113 +50,288 @@ import { PreciseUnitMath } from "../../lib/PreciseUnitMath.sol";
  * non-debt external Positions. Managers are able to set an external contract hook that is called before an
  * issuance is called.
  */
-contract IssuanceModule is ModuleBase, ReentrancyGuard {
+contract IssuanceModule is Ownable, ModuleBase, ReentrancyGuard {
+    using AddressArrayUtils for address[];
     using Invoke for ICKToken;
     using Position for ICKToken;
+    using Position for uint256;
     using PreciseUnitMath for uint256;
+    using ResourceIdentifier for IController;
     using SafeMath for uint256;
     using SafeCast for int256;
     using SignedSafeMath for int256;
 
+    /* ============ Struct ============ */
+    struct WrapExecutionParams {
+        string wrapAdapterName;     // Wrap adapter name
+        address underlyingToken;    // Underlying token address of the wrapped token, ex. WETH is the underlying token of the aETH. This will be passed to wrap adapter to get wrap/unwrap call data
+    }
+
+    struct TradeInfo {
+        ICKToken ckToken;                               // Instance of CKToken
+        IExchangeAdapter exchangeAdapter;               // Instance of exchange adapter contract
+        address sendToken;                              // Address of token being sold
+        address receiveToken;                           // Address of token being bought
+        uint256 totalSendQuantity;                      // Total quantity of sold token
+        uint256 totalReceiveQuantity;                   // Total quantity of token to receive back
+        uint256 preTradeSendTokenBalance;               // Total initial balance of token being sold
+        uint256 preTradeReceiveTokenBalance;            // Total initial balance of token being bought
+        bytes data;                                     // Arbitrary data
+    }
+
     /* ============ Events ============ */
 
-    event CKTokenIssued(address indexed _ckToken, address _issuer, address _to, address _hookContract, uint256 _quantity);
+    event CKTokenIssued(address indexed _ckToken, address _issuer, address _to, address _hookContract, uint256 _ckMintQuantity, uint256 _issuedTokenReturned);
     event CKTokenRedeemed(address indexed _ckToken, address _redeemer, address _to, uint256 _quantity);
+    event AssetExchangeExecutionParamUpdated(address indexed _component, string _newExchangeName);
+    event AssetWrapExecutionParamUpdated(address indexed _component, string _newWrapAdapterName, address _newUnderlyingToken);
+    event ComponentExchanged(
+        ICKToken indexed _ckToken,
+        address indexed _sendToken,
+        address indexed _receiveToken,
+        IExchangeAdapter _exchangeAdapter,
+        uint256 _totalSendAmount,
+        uint256 _totalReceiveAmount
+    );
+    event ComponentWrapped(
+        ICKToken indexed _ckToken,
+        address indexed _underlyingToken,
+        address indexed _wrappedToken,
+        uint256 _underlyingQuantity,
+        uint256 _wrappedQuantity,
+        string _integrationName
+    );
+    event ComponentUnwrapped(
+        ICKToken indexed _ckToken,
+        address indexed _underlyingToken,
+        address indexed _wrappedToken,
+        uint256 _underlyingQuantity,
+        uint256 _wrappedQuantity,
+        string _integrationName
+    );
 
     /* ============ State Variables ============ */
 
     // Mapping of CKToken to Issuance hook configurations
     mapping(ICKToken => IManagerIssuanceHook) public managerIssuanceHook;
+    // Mapping of asset to exchange execution parameters
+    mapping(IERC20 => string) public exchangeInfo;
+    // Mapping of asset to wrap execution parameters
+    mapping(IERC20 => WrapExecutionParams) public wrapInfo;
+    // Wrapped ETH address
+    IWETH public immutable weth;
 
     /* ============ Constructor ============ */
 
     /**
      * Set state controller state variable
      */
-    constructor(IController _controller) public ModuleBase(_controller) {}
+    constructor(IController _controller, IWETH _weth) public ModuleBase(_controller) {
+        weth = _weth;
+    }
 
     /* ============ External Functions ============ */
 
     /**
-     * Deposits components to the CKToken and replicates any external module component positions and mints 
-     * the CKToken. Any issuances with CKTokens that have external positions with negative unit will revert.
+     * Issue ckToken with a specified amount of a single token.
      *
-     * @param _ckToken             Instance of the CKToken contract
-     * @param _quantity             Quantity of the CKToken to mint
+     * @param _ckToken              Instance of the CKToken contract
+     * @param _issueToken           Address of the issue token
+     * @param _issueTokenQuantity   Quantity of the issue token
+     * @param _slippage             Percentage of single token reserved to handle slippage
      * @param _to                   Address to mint CKToken to
+     * @param _returnDust           If to return left component
      */
-    function issue(
+    function issueWithSingleToken(
         ICKToken _ckToken,
-        uint256 _quantity,
-        address _to
-    ) 
+        address _issueToken,
+        uint256 _issueTokenQuantity,
+        uint256 _slippage,
+        address _to,
+        bool _returnDust
+    )
         external
         nonReentrant
         onlyValidAndInitializedCK(_ckToken)
     {
-        require(_quantity > 0, "Issue quantity must be > 0");
+        require(_issueTokenQuantity > 0, "Issue token quantity must be > 0");
+        // Transfer the specified issue token to ckToken
+        transferFrom(
+            IERC20(_issueToken),
+            msg.sender,
+            address(_ckToken),
+            _issueTokenQuantity
+        );
 
-        address hookContract = _callPreIssueHooks(_ckToken, _quantity, msg.sender, _to);
+        uint256 issueTokenRemain = _issueWithSingleToken(_ckToken, _issueToken, _issueTokenQuantity, _slippage, _to, _returnDust);
 
-        (
-            address[] memory components,
-            uint256[] memory componentQuantities
-        ) = getRequiredComponentIssuanceUnits(_ckToken, _quantity, true);
-
-        // For each position, transfer the required underlying to the CKToken and call external module hooks
-        for (uint256 i = 0; i < components.length; i++) {
-            transferFrom(
-                IERC20(components[i]),
-                msg.sender,
-                address(_ckToken),
-                componentQuantities[i]
-            );
-
-            _executeExternalPositionHooks(_ckToken, _quantity, IERC20(components[i]), true);
-        }
-
-        _ckToken.mint(_to, _quantity);
-
-        emit CKTokenIssued(address(_ckToken), msg.sender, _to, hookContract, _quantity);
+        // transfer the remaining issue token to issuer
+        _ckToken.strictInvokeTransfer(
+            _issueToken,
+            msg.sender,
+            issueTokenRemain
+        );
     }
 
     /**
-     * Burns a user's CKToken of specified quantity, unwinds external positions, and returns components
-     * to the specified address. Does not work for debt/negative external positions.
+     * Issue ckToken with a specified amount of ETH.
+     *
+     * @param _ckToken              Instance of the CKToken amount
+     * @param _slippage             Percentage of single token reserved to handle slippage
+     * @param _to                   Address to mint CKToken to
+     * @param _returnDust           If to return left component
+     */
+    function issueWithEther(
+        ICKToken _ckToken,
+        uint256 _slippage,
+        address _to,
+        bool _returnDust
+    )
+        external
+        payable
+        nonReentrant
+        onlyValidAndInitializedCK(_ckToken)
+    {
+        require(msg.value > 0, "Issue ether quantity must be > 0");
+        weth.deposit{ value: msg.value }();
+        // Transfer the specified weth to ckToken
+        transferFrom(
+            weth,
+            address(this),
+            address(_ckToken),
+            msg.value
+        );
+        uint256 issueTokenRemain = _issueWithSingleToken(_ckToken, address(weth), msg.value, _slippage, _to, _returnDust);
+        // transfer the remaining weth to issuer
+        _ckToken.strictInvokeTransfer(
+            address(weth),
+            msg.sender,
+            issueTokenRemain
+        );
+    }
+
+    /**
+     * Issue ckToken with a specified amount of Eth. 
+     *
+     * @param _ckToken              Instance of the CKToken contract
+     * @param _minCkTokenRec        The minimum amount of CKToken to receive
+     * @param _weightings           Eth distribution for each component
+     * @param _to                   Address to mint CKToken to
+     * @param _returnDust           If to return left components
+     */
+    function issueWithEther2(
+        ICKToken _ckToken,
+        uint256 _minCkTokenRec,
+        uint256[] memory _weightings,
+        address _to,
+        bool _returnDust
+    )         
+        external
+        payable
+        nonReentrant
+        onlyValidAndInitializedCK(_ckToken) 
+    {
+        require(msg.value > 0, "Issue ether quantity must be > 0");
+        weth.deposit{ value: msg.value }();
+        // Transfer the specified weth to ckToken
+        transferFrom(
+            weth,
+            address(this),
+            address(_ckToken),
+            msg.value
+        );
+        uint256 issueTokenRemain = _issueWithSingleToken2(_ckToken, address(weth), msg.value, _minCkTokenRec, _weightings, _to, _returnDust);
+        // transfer the remaining weth to issuer
+        _ckToken.strictInvokeTransfer(
+            address(weth),
+            msg.sender,
+            issueTokenRemain
+        );
+    }
+
+    /**
+     * Issue ckToken with a specified amount of a single asset with specification
+     *
+     * @param _ckToken              Instance of the CKToken contract
+     * @param _issueToken           token used to issue with
+     * @param _issueTokenQuantity   amount of issue tokens
+     * @param _minCkTokenRec        The minimum amount of CKToken to receive
+     * @param _weightings           Eth distribution for each component
+     * @param _to                   Address to mint CKToken to
+     * @param _returnDust           If to return left components
+     */
+    function issueWithSingleToken2 (
+        ICKToken _ckToken,
+        address _issueToken,
+        uint256 _issueTokenQuantity,
+        uint256 _minCkTokenRec,
+        uint256[] memory _weightings,  // percentage in 18 decimals and order should follow ckComponents get from a ck token
+        address _to,
+        bool _returnDust
+    )   
+        external
+        nonReentrant
+        onlyValidAndInitializedCK(_ckToken) 
+    {
+        require(_issueTokenQuantity > 0, "Issue token quantity must be > 0");
+        // Transfer the specified issue token to ckToken
+        transferFrom(
+            IERC20(_issueToken),
+            msg.sender,
+            address(_ckToken),
+            _issueTokenQuantity
+        );        
+        
+        uint256 issueTokenRemain = _issueWithSingleToken2(_ckToken, _issueToken, _issueTokenQuantity, _minCkTokenRec, _weightings, _to, _returnDust);
+        // transfer the remaining weth to issuer
+        _ckToken.strictInvokeTransfer(
+            address(_issueToken),
+            msg.sender,
+            issueTokenRemain
+        );
+        
+    }
+
+    /**
+     * Burns a user's CKToken of specified quantity, unwinds external positions, and exchange components
+     * to the specified token and return to the specified address. Does not work for debt/negative external positions.
      *
      * @param _ckToken             Instance of the CKToken contract
-     * @param _quantity             Quantity of the CKToken to redeem
-     * @param _to                   Address to send component assets to
+     * @param _ckTokenQuantity     Quantity of the CKToken to redeem
+     * @param _redeemToken         Address of redeem token
+     * @param _to                  Address to redeem CKToken to
      */
-    function redeem(
+    function redeemToSingleToken(
         ICKToken _ckToken,
-        uint256 _quantity,
+        uint256 _ckTokenQuantity,
+        address _redeemToken,
         address _to
     )
         external
         nonReentrant
         onlyValidAndInitializedCK(_ckToken)
     {
-        require(_quantity > 0, "Redeem quantity must be > 0");
-
-        _ckToken.burn(msg.sender, _quantity);
+        require(_ckTokenQuantity > 0, "Redeem quantity must be > 0");
+        _ckToken.burn(msg.sender, _ckTokenQuantity);
 
         (
             address[] memory components,
             uint256[] memory componentQuantities
-        ) = getRequiredComponentIssuanceUnits(_ckToken, _quantity, false);
-
+        ) = getRequiredComponentIssuanceUnits(_ckToken, _ckTokenQuantity, false);
+        uint256 totalRedeemTokenAcquired = 0;
         for (uint256 i = 0; i < components.length; i++) {
-            _executeExternalPositionHooks(_ckToken, _quantity, IERC20(components[i]), false);
-            
-            _ckToken.strictInvokeTransfer(
-                components[i],
-                _to,
-                componentQuantities[i]
-            );
+            _executeExternalPositionHooks(_ckToken, _ckTokenQuantity, IERC20(components[i]), false);
+            uint256 redeemTokenAcquired = _exchangeDefaultPositionsToRedeemToken(_ckToken, _redeemToken, components[i], componentQuantities[i]);
+            totalRedeemTokenAcquired = totalRedeemTokenAcquired.add(redeemTokenAcquired);
         }
 
-        emit CKTokenRedeemed(address(_ckToken), msg.sender, _to, _quantity);
+        _ckToken.strictInvokeTransfer(
+            _redeemToken,
+            _to,
+            totalRedeemTokenAcquired
+        );
+
+        emit CKTokenRedeemed(address(_ckToken), msg.sender, _to, _ckTokenQuantity);
     }
 
     /**
@@ -172,14 +355,66 @@ contract IssuanceModule is ModuleBase, ReentrancyGuard {
     }
 
     /**
-     * Reverts as this module should not be removable after added. Users should always
-     * have a way to redeem their CKs
+     * Removes this module from the CKToken, via call by the CKToken. Left with empty logic
+     * here because there are no check needed to verify removal.
      */
-    function removeModule() external override {
-        revert("The IssuanceModule module cannot be removed");
+    function removeModule() external override {}
+
+    /**
+     * OWNER ONLY: Set exchange for passed components of the CKToken. Can be called at anytime.
+     *
+     * @param _components           Array of components
+     * @param _exchangeNames        Array of exchange names mapping to correct component
+     */
+    function setExchanges(
+        address[] memory _components,
+        string[] memory _exchangeNames
+    )
+        external
+        onlyOwner
+    {
+        _components.validatePairsWithArray(_exchangeNames);
+
+        for (uint256 i = 0; i < _components.length; i++) {
+            require(
+                controller.getIntegrationRegistry().isValidIntegration(address(this), _exchangeNames[i]),
+                "Unrecognized exchange name"
+            );
+
+            exchangeInfo[IERC20(_components[i])] = _exchangeNames[i];
+            emit AssetExchangeExecutionParamUpdated(_components[i], _exchangeNames[i]);
+        }
     }
 
-    /* ============ External Getter Functions ============ */
+    /**
+     * OWNER ONLY: Set wrap adapters for passed components of the CKToken. Can be called at anytime.
+     *
+     * @param _components           Array of components
+     * @param _wrapAdapterNames     Array of wrap adapter names mapping to correct component
+     * @param _underlyingTokens     Array of underlying tokens mapping to correct component
+     */
+    function setWrapAdapters(
+        address[] memory _components,
+        string[] memory _wrapAdapterNames,
+        address[] memory _underlyingTokens
+    )
+    external
+    onlyOwner
+    {
+        _components.validatePairsWithArray(_wrapAdapterNames);
+        _components.validatePairsWithArray(_underlyingTokens);
+
+        for (uint256 i = 0; i < _components.length; i++) {
+            require(
+                controller.getIntegrationRegistry().isValidIntegration(address(this), _wrapAdapterNames[i]),
+                "Unrecognized wrap adapter name"
+            );
+
+            wrapInfo[IERC20(_components[i])].wrapAdapterName = _wrapAdapterNames[i];
+            wrapInfo[IERC20(_components[i])].underlyingToken = _underlyingTokens[i];
+            emit AssetWrapExecutionParamUpdated(_components[i], _wrapAdapterNames[i], _underlyingTokens[i]);
+        }
+    }
 
     /**
      * Retrieves the addresses and units required to issue/redeem a particular quantity of CKToken.
@@ -211,12 +446,192 @@ contract IssuanceModule is ModuleBase, ReentrancyGuard {
             notionalUnits[i] = _isIssue ? 
                 issuanceUnits[i].preciseMulCeil(_quantity) : 
                 issuanceUnits[i].preciseMul(_quantity);
+            require(notionalUnits[i] > 0, "component amount should not be zero");
         }
 
         return (components, notionalUnits);
     }
 
     /* ============ Internal Functions ============ */
+
+    /**
+     * Issue ckToken with a specified amount of a single token.
+     *
+     * @param _ckToken              Instance of the CKToken contract
+     * @param _issueToken           Address of the issue token
+     * @param _issueTokenQuantity   Quantity of the issue token
+     * @param _slippage             Percentage of single token reserved to handle slippage
+     * @param _to                   Address to mint CKToken to
+     */
+    function _issueWithSingleToken(
+        ICKToken _ckToken,
+        address _issueToken,
+        uint256 _issueTokenQuantity,
+        uint256 _slippage,
+        address _to,
+        bool _returnDust
+    )
+        internal
+        returns(uint256)
+    {
+        // Calculate how many ckTokens can be issued with the specified amount of issue token
+        // Get valuation of the CKToken with the quote asset as the issue token. Returns value in precise units (1e18)
+        // Reverts if price is not found
+        uint256 ckTokenValuation = controller.getCKValuer().calculateCKTokenValuation(_ckToken, _issueToken);
+        uint256 ckTokenQuantity = _issueTokenQuantity.preciseDiv(uint256(10).safePower(uint256(ERC20(_issueToken).decimals()))).preciseMul(PreciseUnitMath.preciseUnit().sub(_slippage)).preciseDiv(ckTokenValuation);
+        address hookContract = _callPreIssueHooks(_ckToken, ckTokenQuantity, msg.sender, _to);
+        // Get components and required notional amount to issue ckTokens    
+        (uint256 ckTokenQuantityToMint, uint256 issueTokenRemain)= _tradeAndWrapComponents(_ckToken, _issueToken, _issueTokenQuantity, ckTokenQuantity, _returnDust);
+        _ckToken.mint(_to, ckTokenQuantityToMint);
+
+        emit CKTokenIssued(address(_ckToken), msg.sender, _to, hookContract, ckTokenQuantityToMint, issueTokenRemain);
+        return issueTokenRemain;
+    }
+
+    /**
+     * This is a internal implementation for issue ckToken with a specified amount of a single asset with specification. 
+     *
+     * @param _ckToken              Instance of the CKToken contract
+     * @param _issueToken           token used to issue with
+     * @param _issueTokenQuantity   amount of issue tokens
+     * @param _minCkTokenRec        The minimum amount of CKToken to receive
+     * @param _weightings           Eth distribution for each component
+     * @param _to                   Address to mint CKToken to
+     * @param _returnDust           If to return left components
+     */
+    function _issueWithSingleToken2 (       
+        ICKToken _ckToken,
+        address _issueToken,
+        uint256 _issueTokenQuantity,
+        uint256 _minCkTokenRec,
+        uint256[] memory _weightings,
+        address _to,
+        bool _returnDust
+    ) 
+        internal 
+        returns(uint256)
+    {
+        address hookContract = _callPreIssueHooks(_ckToken, _minCkTokenRec, msg.sender, _to);
+        address[] memory components = _ckToken.getComponents();
+        require(components.length == _weightings.length, "weightings mismatch");
+        (uint256 maxCkTokenToIssue, uint256 returnedIssueToken) = _issueWithSpec(_ckToken, _issueToken, _issueTokenQuantity, components, _weightings, _returnDust);
+        require(maxCkTokenToIssue >= _minCkTokenRec, "_minCkTokenRec to met");
+
+        _ckToken.mint(_to, maxCkTokenToIssue);
+
+        emit CKTokenIssued(address(_ckToken), msg.sender, _to, hookContract, maxCkTokenToIssue, returnedIssueToken);        
+        
+        return returnedIssueToken;
+    }
+
+    function _issueWithSpec(ICKToken _ckToken, address _issueToken, uint256 _issueTokenQuantity, address[] memory components, uint256[] memory _weightings, bool _returnDust) 
+        internal 
+        returns(uint256, uint256)
+    {
+        uint256 maxCkTokenToIssue = PreciseUnitMath.MAX_UINT_256;
+        uint256[] memory componentTokenReceiveds = new uint256[](components.length);
+
+        for (uint256 i = 0; i < components.length; i++) {
+            uint256 _issueTokenAmountToUse = _issueTokenQuantity.preciseMul(_weightings[i]).sub(1); // avoid underflow
+            uint256 componentRealUnitRequired = (_ckToken.getDefaultPositionRealUnit(components[i])).toUint256();
+            uint256 componentReceived = _tradeAndWrapComponents2(_ckToken, _issueToken, _issueTokenAmountToUse, components[i]);
+            componentTokenReceiveds[i] = componentReceived;
+            // guarantee issue ck token amount.
+            uint256 maxIssue = componentReceived.preciseDiv(componentRealUnitRequired);
+            if (maxIssue <= maxCkTokenToIssue) {
+                maxCkTokenToIssue = maxIssue;
+            }
+        }   
+
+        uint256 issueTokenToReturn = _dustToReturn(_ckToken, _issueToken, componentTokenReceiveds, maxCkTokenToIssue, _returnDust);
+ 
+        return (maxCkTokenToIssue, issueTokenToReturn);
+    }
+
+    function _tradeAndWrapComponents2(ICKToken _ckToken, address _issueToken, uint256 _issueTokenAmountToUse, address _component) internal returns(uint256) {
+        uint256 componentTokenReceived;
+        if (_issueToken == _component) {
+            componentTokenReceived = _issueTokenAmountToUse;     
+        } else if (wrapInfo[IERC20(_component)].underlyingToken == address(0)) {
+            // For underlying tokens, exchange directly
+            (, componentTokenReceived) = _trade(_ckToken, _issueToken, _component, _issueTokenAmountToUse, true);
+        } else {
+            // For wrapped tokens, exchange to underlying tokens first and then wrap it
+            WrapExecutionParams memory wrapExecutionParams = wrapInfo[IERC20(_component)];
+            IWrapAdapter wrapAdapter = IWrapAdapter(getAndValidateAdapter(wrapExecutionParams.wrapAdapterName));
+            uint256 underlyingReceived = 0;
+            if (wrapExecutionParams.underlyingToken == wrapAdapter.ETH_TOKEN_ADDRESS()) {
+                if (_issueToken != address(weth)) {
+                    (, underlyingReceived) = _trade(_ckToken, _issueToken, address(weth), _issueTokenAmountToUse, true);
+                } else {
+                    underlyingReceived = _issueTokenAmountToUse;
+                }
+                componentTokenReceived = _wrap(_ckToken, wrapExecutionParams.underlyingToken, _component, underlyingReceived, wrapExecutionParams.wrapAdapterName, true);
+            } else {
+                (, underlyingReceived) = _trade(_ckToken, _issueToken, wrapExecutionParams.underlyingToken, _issueTokenAmountToUse, true);
+                componentTokenReceived = _wrap(_ckToken, wrapExecutionParams.underlyingToken, _component, underlyingReceived, wrapExecutionParams.wrapAdapterName, false);
+            }
+        }
+
+        return componentTokenReceived;
+    }
+    
+
+    function _tradeAndWrapComponents(ICKToken _ckToken, address _issueToken, uint256 issueTokenRemain, uint256 ckTokenQuantity, bool _returnDust)
+        internal
+        returns(uint256, uint256)
+    {
+        (
+        address[] memory components,
+        uint256[] memory componentQuantities
+        ) = getRequiredComponentIssuanceUnits(_ckToken, ckTokenQuantity, true);
+        // Transform the issue token to each components
+        uint256 issueTokenSpent;
+        uint256 componentTokenReceived;
+        uint256 minIssuePercentage = 10 ** 18;
+        uint256[] memory componentTokenReceiveds = new uint256[](components.length);
+
+        for (uint256 i = 0; i < components.length; i++) {
+            (issueTokenSpent, componentTokenReceived) = _exchangeIssueTokenToDefaultPositions(_ckToken, _issueToken, components[i], componentQuantities[i]);
+            require(issueTokenRemain >= issueTokenSpent, "Not enough issue token remaining");
+            issueTokenRemain = issueTokenRemain.sub(issueTokenSpent);
+            _executeExternalPositionHooks(_ckToken, ckTokenQuantity, IERC20(components[i]), true);
+
+            // guarantee issue ck token amount.
+            uint256 issuePercentage = componentTokenReceived.preciseDiv(componentQuantities[i]);
+            if (issuePercentage <= minIssuePercentage) {
+                minIssuePercentage = issuePercentage;
+            }
+            componentTokenReceiveds[i] = componentTokenReceived;
+        }
+
+        uint256 maxCkTokenToIssue = ckTokenQuantity.preciseMul(minIssuePercentage);
+        issueTokenRemain = issueTokenRemain.add(_dustToReturn(_ckToken, _issueToken, componentTokenReceiveds, maxCkTokenToIssue, _returnDust));
+
+        return (maxCkTokenToIssue, issueTokenRemain);
+    }
+
+    /**
+     * Swap remaining component back to issue token.
+     */
+    function _dustToReturn(ICKToken _ckToken, address _issueToken, uint256[] memory componentTokenReceiveds, uint256 maxCkTokenToIssue, bool _returnDust) internal returns(uint256) {
+        if (!_returnDust) {
+            return 0;
+        }
+        uint256 issueTokenToReturn = 0;
+        address[] memory components = _ckToken.getComponents();
+
+        for(uint256 i = 0; i < components.length; i++) {
+            uint256 requiredComponentUnit = ((_ckToken.getDefaultPositionRealUnit(components[i])).toUint256()).preciseMul(maxCkTokenToIssue);
+            uint256 toReturn = componentTokenReceiveds[i].sub(requiredComponentUnit);
+            uint256 diffPercentage = toReturn.preciseDiv(requiredComponentUnit); // percentage in 18 decimals
+            if (diffPercentage > (PreciseUnitMath.preciseUnit().div(10000))) { // 0.01%
+                issueTokenToReturn = issueTokenToReturn.add(_exchangeDefaultPositionsToRedeemToken(_ckToken, _issueToken, components[i], toReturn));
+            }
+        }     
+
+        return issueTokenToReturn;
+    }    
 
     /**
      * Retrieves the component addresses and list of total units for components. This will revert if the external unit
@@ -292,5 +707,529 @@ contract IssuanceModule is ModuleBase, ReentrancyGuard {
                 IModuleIssuanceHook(externalPositionModules[i]).componentRedeemHook(_ckToken, _ckTokenQuantity, _component, true);
             }
         }
+    }
+
+    function _exchangeIssueTokenToDefaultPositions(ICKToken _ckToken, address _issueToken, address _component, uint256 _componentQuantity) internal returns(uint256, uint256) {
+        uint256 issueTokenSpent;
+        uint256 componentTokenReceived;
+        if (_issueToken == _component) {
+            // continue if issue token is component token
+            issueTokenSpent = _componentQuantity;
+            componentTokenReceived = _componentQuantity;
+        } else if (wrapInfo[IERC20(_component)].underlyingToken == address(0)) {
+            // For underlying tokens, exchange directly
+            (issueTokenSpent, componentTokenReceived) = _trade(_ckToken, _issueToken, _component, _componentQuantity, false);
+        } else {
+            // For wrapped tokens, exchange to underlying tokens first and then wrap it
+            WrapExecutionParams memory wrapExecutionParams = wrapInfo[IERC20(_component)];
+            IWrapAdapter wrapAdapter = IWrapAdapter(getAndValidateAdapter(wrapExecutionParams.wrapAdapterName));
+            uint256 underlyingTokenQuantity = wrapAdapter.getDepositUnderlyingTokenAmount(wrapExecutionParams.underlyingToken, _component, _componentQuantity);
+            if (wrapExecutionParams.underlyingToken == wrapAdapter.ETH_TOKEN_ADDRESS()) {
+                if (_issueToken != address(weth)) {
+                    (issueTokenSpent, ) = _trade(_ckToken, _issueToken, address(weth), underlyingTokenQuantity, false);
+                } else {
+                    issueTokenSpent = underlyingTokenQuantity;
+                }
+                componentTokenReceived = _wrap(_ckToken, wrapExecutionParams.underlyingToken, _component, underlyingTokenQuantity, wrapExecutionParams.wrapAdapterName, true);
+            } else {
+                (issueTokenSpent,) = _trade(_ckToken, _issueToken, wrapExecutionParams.underlyingToken, underlyingTokenQuantity, false);
+                componentTokenReceived = _wrap(_ckToken, wrapExecutionParams.underlyingToken, _component, underlyingTokenQuantity, wrapExecutionParams.wrapAdapterName, false);
+            }
+        }
+        return (issueTokenSpent, componentTokenReceived);
+    }
+
+    function _exchangeDefaultPositionsToRedeemToken(ICKToken _ckToken, address _redeemToken, address _component, uint256 _componentQuantity) internal returns(uint256) {
+        uint256 redeemTokenAcquired;
+        if (_redeemToken == _component) {
+            // continue if redeem token is component token
+            redeemTokenAcquired = _componentQuantity;
+        } else if (wrapInfo[IERC20(_component)].underlyingToken == address(0)) {
+            // For underlying tokens, exchange directly
+            
+            (, redeemTokenAcquired) = _trade(_ckToken, _component, _redeemToken, _componentQuantity, true);
+        } else {
+            // For wrapped tokens, unwrap it and exchange underlying tokens to redeem tokens
+            WrapExecutionParams memory wrapExecutionParams = wrapInfo[IERC20(_component)];
+            IWrapAdapter wrapAdapter = IWrapAdapter(getAndValidateAdapter(wrapExecutionParams.wrapAdapterName));
+
+            (uint256 underlyingReceived, uint256 unwrappedAmount) = 
+            _unwrap(_ckToken, wrapExecutionParams.underlyingToken, _component, _componentQuantity, wrapExecutionParams.wrapAdapterName, wrapExecutionParams.underlyingToken == wrapAdapter.ETH_TOKEN_ADDRESS());
+
+            if (wrapExecutionParams.underlyingToken == wrapAdapter.ETH_TOKEN_ADDRESS()) {
+                (, redeemTokenAcquired) = _trade(_ckToken, address(weth), _redeemToken, underlyingReceived, true);                
+            } else {
+                (, redeemTokenAcquired) = _trade(_ckToken, wrapExecutionParams.underlyingToken, _redeemToken, underlyingReceived, true);                
+            }    
+        }
+        return redeemTokenAcquired;
+    }
+
+    /**
+     * Take snapshot of CKToken's balance of underlying and wrapped tokens.
+     */
+    function _snapshotTargetTokenBalance(
+        ICKToken _ckToken,
+        address _targetToken
+    ) internal view returns(uint256) {
+        uint256 targetTokenBalance = IERC20(_targetToken).balanceOf(address(_ckToken));
+        return (targetTokenBalance);
+    }
+
+    /**
+     * Validate post trade data.
+     *
+     * @param _tradeInfo                Struct containing trade information used in internal functions
+     */
+    function _validatePostTrade(TradeInfo memory _tradeInfo) internal view returns (uint256) {
+        uint256 exchangedQuantity = IERC20(_tradeInfo.receiveToken)
+        .balanceOf(address(_tradeInfo.ckToken))
+        .sub(_tradeInfo.preTradeReceiveTokenBalance);
+
+        require(
+            exchangedQuantity >= _tradeInfo.totalReceiveQuantity, "Slippage too big"
+        );
+        return exchangedQuantity;
+    }
+
+    /**
+     * Validate pre trade data. Check exchange is valid, token quantity is valid.
+     *
+     * @param _tradeInfo            Struct containing trade information used in internal functions
+     */
+    function _validatePreTradeData(TradeInfo memory _tradeInfo) internal view {
+        require(_tradeInfo.totalSendQuantity > 0, "Token to sell must be nonzero");
+        uint256 sendTokenBalance = IERC20(_tradeInfo.sendToken).balanceOf(address(_tradeInfo.ckToken));
+        require(
+            sendTokenBalance >= _tradeInfo.totalSendQuantity,
+            "total send quantity cant be greater than existing"
+        );
+    }
+
+    /**
+     * Create and return TradeInfo struct
+     *
+     * @param _ckToken              Instance of the CKToken to trade
+     * @param _exchangeAdapter      The exchange adapter in the integrations registry
+     * @param _sendToken            Address of the token to be sent to the exchange
+     * @param _receiveToken         Address of the token that will be received from the exchange
+     * @param _exactQuantity        Exact token quantity during trade
+     * @param _isSendTokenFixed     Indicate if the send token is fixed
+     *
+     * return TradeInfo             Struct containing data for trade
+     */
+    function _createTradeInfo(
+        ICKToken _ckToken,
+        IExchangeAdapter _exchangeAdapter,
+        address _sendToken,
+        address _receiveToken,
+        uint256 _exactQuantity,
+        bool _isSendTokenFixed
+    )
+        internal
+        view
+        returns (TradeInfo memory)
+    {
+        uint256 thresholdAmount;
+        address[] memory path;
+        if (_sendToken == address(weth) || _receiveToken == address(weth)) {
+            path = new address[](2);
+            path[0] = _sendToken;
+            path[1] = _receiveToken;
+            // uint256[] memory thresholdAmounts = _isSendTokenFixed ? _exchangeAdapter.getMinAmountsOut(_exactQuantity, path) : _exchangeAdapter.getMaxAmountsIn(_exactQuantity, path);
+            // thresholdAmount = _isSendTokenFixed ? thresholdAmounts[1] : thresholdAmounts[0];
+        } else {
+            path = new address[](3);
+            path[0] = _sendToken;
+            path[1] = address(weth);
+            path[2] = _receiveToken;
+            // uint256[] memory thresholdAmounts = _isSendTokenFixed ? _exchangeAdapter.getMinAmountsOut(_exactQuantity, path) : _exchangeAdapter.getMaxAmountsIn(_exactQuantity, path);
+            // thresholdAmount = _isSendTokenFixed ? thresholdAmounts[2] : thresholdAmounts[0];
+        }
+
+        TradeInfo memory tradeInfo;
+        tradeInfo.ckToken = _ckToken;
+        tradeInfo.exchangeAdapter = _exchangeAdapter;
+        tradeInfo.sendToken = _sendToken;
+        tradeInfo.receiveToken = _receiveToken;
+        tradeInfo.totalSendQuantity =  _exactQuantity;
+        tradeInfo.totalReceiveQuantity = 0;
+        tradeInfo.preTradeSendTokenBalance = _snapshotTargetTokenBalance(_ckToken, _sendToken);
+        tradeInfo.preTradeReceiveTokenBalance = _snapshotTargetTokenBalance(_ckToken, _receiveToken);
+        tradeInfo.data = _isSendTokenFixed ? _exchangeAdapter.generateDataParam(path, true) : _exchangeAdapter.generateDataParam(path, false);
+        return tradeInfo;
+    }
+
+    /**
+     * Calculate the exchange execution price based on send and receive token amount.
+     *
+     * @param _sendToken            Address of the token to be sent to the exchange
+     * @param _receiveToken         Address of the token that will be received from the exchange
+     * @param _isSendTokenFixed     Indicate if the send token is fixed
+     * @param _exactQuantity        Exact token quantity during trade
+     * @param _thresholdAmount      Max/Min amount of token to send/receive
+     *
+     * return uint256               Exchange execution price
+     */
+    function _calculateExchangeExecutionPrice(address _sendToken, address _receiveToken, bool _isSendTokenFixed,
+        uint256 _exactQuantity, uint256 _thresholdAmount) internal view returns (uint256)
+    {
+        uint256 sendQuantity = _isSendTokenFixed ? _exactQuantity : _thresholdAmount;
+        uint256 receiveQuantity = _isSendTokenFixed ? _thresholdAmount : _exactQuantity;
+        uint256 normalizedSendQuantity = sendQuantity.preciseDiv(uint256(10).safePower(uint256(ERC20(_sendToken).decimals())));
+        uint256 normalizedReceiveQuantity = receiveQuantity.preciseDiv(uint256(10).safePower(uint256(ERC20(_receiveToken).decimals())));
+        return normalizedReceiveQuantity.preciseDiv(normalizedSendQuantity);
+    }
+
+    /**
+     * Invoke approve for send token, get method data and invoke trade in the context of the CKToken.
+     *
+     * @param _ckToken              Instance of the CKToken to trade
+     * @param _exchangeAdapter      Exchange adapter in the integrations registry
+     * @param _sendToken            Address of the token to be sent to the exchange
+     * @param _receiveToken         Address of the token that will be received from the exchange
+     * @param _sendQuantity         Units of token in CKToken sent to the exchange
+     * @param _receiveQuantity      Units of token in CKToken received from the exchange
+     * @param _data                 Arbitrary bytes to be used to construct trade call data
+     */
+    function _executeTrade(
+        ICKToken _ckToken,
+        IExchangeAdapter _exchangeAdapter,
+        address _sendToken,
+        address _receiveToken,
+        uint256 _sendQuantity,
+        uint256 _receiveQuantity,
+        bytes memory _data
+    )
+        internal
+    {
+        // Get spender address from exchange adapter and invoke approve for exact amount on CKToken
+        _ckToken.invokeApprove(
+            _sendToken,
+            _exchangeAdapter.getSpender(),
+            _sendQuantity
+        );
+
+        (
+            address targetExchange,
+            uint256 callValue,
+            bytes memory methodData
+        ) = _exchangeAdapter.getTradeCalldata(
+            _sendToken,
+            _receiveToken,
+            address(_ckToken),
+            _sendQuantity,
+            _receiveQuantity,
+            _data
+        );
+
+        _ckToken.invoke(targetExchange, callValue, methodData);
+    }
+
+    /**
+     * Executes a trade on a supported DEX.
+     *
+     * @param _ckToken              Instance of the CKToken to trade
+     * @param _sendToken            Address of the token to be sent to the exchange
+     * @param _receiveToken         Address of the token that will be received from the exchange
+     * @param _exactQuantity        Exact Quantity of token in CKToken to be sent or received from the exchange
+     * @param _isSendTokenFixed     Indicate if the send token is fixed
+     */
+    function _trade(
+        ICKToken _ckToken,
+        address _sendToken,
+        address _receiveToken,
+        uint256 _exactQuantity,
+        bool _isSendTokenFixed
+    )
+        internal
+        returns (uint256, uint256)
+    {
+        if (address(_sendToken) == address(_receiveToken)) {
+            return (_exactQuantity, _exactQuantity);
+        }
+        TradeInfo memory tradeInfo = _createTradeInfo(
+            _ckToken,
+            IExchangeAdapter(getAndValidateAdapter(exchangeInfo[IERC20(_receiveToken)])),
+            _sendToken,
+            _receiveToken,
+            _exactQuantity,
+            _isSendTokenFixed
+        );
+        _validatePreTradeData(tradeInfo);
+        _executeTrade(tradeInfo.ckToken, tradeInfo.exchangeAdapter, tradeInfo.sendToken, tradeInfo.receiveToken, tradeInfo.totalSendQuantity, tradeInfo.totalReceiveQuantity, tradeInfo.data);
+        _validatePostTrade(tradeInfo);
+        uint256 totalSendQuantity = tradeInfo.preTradeSendTokenBalance.sub(_snapshotTargetTokenBalance(_ckToken, _sendToken));
+        uint256 totalReceiveQuantity = _snapshotTargetTokenBalance(_ckToken, _receiveToken).sub(tradeInfo.preTradeReceiveTokenBalance);
+        emit ComponentExchanged(
+            _ckToken,
+            _sendToken,
+            _receiveToken,
+            tradeInfo.exchangeAdapter,
+            totalSendQuantity,
+            totalReceiveQuantity
+        );
+        return (totalSendQuantity, totalReceiveQuantity);
+    }
+
+    /**
+     * Instructs the CKToken to wrap an underlying asset into a wrappedToken via a specified adapter.
+     *
+     * @param _ckToken              Instance of the CKToken
+     * @param _underlyingToken      Address of the component to be wrapped
+     * @param _wrappedToken         Address of the desired wrapped token
+     * @param _underlyingQuantity   Quantity of underlying tokens to wrap
+     * @param _integrationName      Name of wrap module integration (mapping on integration registry)
+     */
+    function _wrap(
+        ICKToken _ckToken,
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _underlyingQuantity,
+        string memory _integrationName,
+        bool _usesEther
+    )
+        internal
+        returns (uint256)
+    {
+        (
+        uint256 notionalUnderlyingWrapped,
+        uint256 notionalWrapped
+        ) = _validateAndWrap(
+            _integrationName,
+            _ckToken,
+            _underlyingToken,
+            _wrappedToken,
+            _underlyingQuantity,
+            _usesEther // does not use Ether
+        );
+
+        emit ComponentWrapped(
+            _ckToken,
+            _underlyingToken,
+            _wrappedToken,
+            notionalUnderlyingWrapped,
+            notionalWrapped,
+            _integrationName
+        );
+        return notionalWrapped;
+    }
+
+    /**
+     * MANAGER-ONLY: Instructs the CKToken to unwrap a wrapped asset into its underlying via a specified adapter.
+     *
+     * @param _ckToken              Instance of the CKToken
+     * @param _underlyingToken      Address of the underlying asset
+     * @param _wrappedToken         Address of the component to be unwrapped
+     * @param _wrappedQuantity      Quantity of wrapped tokens in Position units
+     * @param _integrationName      ID of wrap module integration (mapping on integration registry)
+     */
+    function _unwrap(
+        ICKToken _ckToken,
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _wrappedQuantity,
+        string memory _integrationName,
+        bool _usesEther
+    )
+        internal returns (uint256, uint256)
+    {
+        (
+        uint256 notionalUnderlyingUnwrapped,
+        uint256 notionalUnwrapped
+        ) = _validateAndUnwrap(
+            _integrationName,
+            _ckToken,
+            _underlyingToken,
+            _wrappedToken,
+            _wrappedQuantity,
+            _usesEther // uses Ether
+        );
+
+        emit ComponentUnwrapped(
+            _ckToken,
+            _underlyingToken,
+            _wrappedToken,
+            notionalUnderlyingUnwrapped,
+            notionalUnwrapped,
+            _integrationName
+        );
+
+        return (notionalUnderlyingUnwrapped, notionalUnwrapped);
+    }
+
+    /**
+     * The WrapModule approves the underlying to the 3rd party
+     * integration contract, then invokes the CKToken to call wrap by passing its calldata along. When raw ETH
+     * is being used (_usesEther = true) WETH position must first be unwrapped and underlyingAddress sent to
+     * adapter must be external protocol's ETH representative address.
+     *
+     * Returns notional amount of underlying tokens and wrapped tokens that were wrapped.
+     */
+    function _validateAndWrap(
+        string memory _integrationName,
+        ICKToken _ckToken,
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _underlyingQuantity,
+        bool _usesEther
+    )
+        internal
+        returns (uint256, uint256)
+    {
+        uint256 preActionUnderlyingNotional;
+        // Snapshot pre wrap balances
+        uint256 preActionWrapNotional = _snapshotTargetTokenBalance(_ckToken, _wrappedToken);
+
+        IWrapAdapter wrapAdapter = IWrapAdapter(getAndValidateAdapter(_integrationName));
+
+        address snapshotToken = _usesEther ? address(weth) : _underlyingToken;
+        _validateInputs(_ckToken, snapshotToken, _underlyingQuantity);
+        preActionUnderlyingNotional = _snapshotTargetTokenBalance(_ckToken, snapshotToken);
+
+        // Execute any pre-wrap actions depending on if using raw ETH or not
+        if (_usesEther) {
+            _ckToken.invokeUnwrapWETH(address(weth), _underlyingQuantity);
+        } else {
+            address spender = wrapAdapter.getWrapSpenderAddress(_underlyingToken, _wrappedToken);
+            _ckToken.invokeApprove(_underlyingToken, spender, _underlyingQuantity.add(1));
+        }
+
+        // Get function call data and invoke on CKToken
+        _createWrapDataAndInvoke(
+            _ckToken,
+            wrapAdapter,
+            _usesEther ? wrapAdapter.ETH_TOKEN_ADDRESS() : _underlyingToken,
+            _wrappedToken,
+            _underlyingQuantity
+        );
+
+        // Snapshot post wrap balances
+        uint256 postActionUnderlyingNotional = _snapshotTargetTokenBalance(_ckToken, snapshotToken);
+        uint256 postActionWrapNotional = _snapshotTargetTokenBalance(_ckToken, _wrappedToken);
+        return (
+            preActionUnderlyingNotional.sub(postActionUnderlyingNotional),
+            postActionWrapNotional.sub(preActionWrapNotional)
+        );
+    }
+
+    /**
+     * The WrapModule calculates the total notional wrap token to unwrap, then invokes the CKToken to call
+     * unwrap by passing its calldata along. When raw ETH is being used (_usesEther = true) underlyingAddress
+     * sent to adapter must be set to external protocol's ETH representative address and ETH returned from
+     * external protocol is wrapped.
+     *
+     * Returns notional amount of underlying tokens and wrapped tokens unwrapped.
+     */
+    function _validateAndUnwrap(
+        string memory _integrationName,
+        ICKToken _ckToken,
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _wrappedTokenQuantity,
+        bool _usesEther
+    )
+        internal
+        returns (uint256, uint256)
+    {
+        _validateInputs(_ckToken, _wrappedToken, _wrappedTokenQuantity);
+
+        // Snapshot pre wrap balance
+        address snapshotToken = _usesEther ? address(weth) : _underlyingToken;
+        uint256 preActionUnderlyingNotional = _snapshotTargetTokenBalance(_ckToken, snapshotToken);
+        uint256 preActionWrapNotional = _snapshotTargetTokenBalance(_ckToken, _wrappedToken);
+
+        IWrapAdapter wrapAdapter = IWrapAdapter(getAndValidateAdapter(_integrationName));
+        address unWrapSpender = wrapAdapter.getUnwrapSpenderAddress(_underlyingToken, _wrappedToken);
+        _ckToken.invokeApprove(_wrappedToken, unWrapSpender, _wrappedTokenQuantity);
+        
+        // Get function call data and invoke on CKToken
+        _createUnwrapDataAndInvoke(
+            _ckToken,
+            wrapAdapter,
+            _usesEther ? wrapAdapter.ETH_TOKEN_ADDRESS() : _underlyingToken,
+            _wrappedToken,
+            _wrappedTokenQuantity
+        );
+
+        // immediately wrap to WTH after getting back ETH
+        if (_usesEther) {
+            _ckToken.invokeWrapWETH(address(weth), address(_ckToken).balance);
+        }
+        
+        // Snapshot post wrap balances
+        uint256 postActionUnderlyingNotional = _snapshotTargetTokenBalance(_ckToken, snapshotToken);
+        uint256 postActionWrapNotional = _snapshotTargetTokenBalance(_ckToken, _wrappedToken);
+        return (
+            postActionUnderlyingNotional.sub(preActionUnderlyingNotional),
+            preActionWrapNotional.sub(postActionWrapNotional)
+        );
+    }
+
+    /**
+     * Validates the wrap operation is valid. In particular, the following checks are made:
+     * - The position is Default
+     * - The position has sufficient units given the transact quantity
+     * - The transact quantity > 0
+     *
+     * It is expected that the adapter will check if wrappedToken/underlyingToken are a valid pair for the given
+     * integration.
+     */
+    function _validateInputs(
+        ICKToken _ckToken,
+        address _component,
+        uint256 _quantity
+    )
+        internal
+        view
+    {
+        require(_quantity > 0, "component quantity must be > 0");
+        require(_snapshotTargetTokenBalance(_ckToken, _component) >= _quantity, "quantity cant be greater than existing");
+    }
+
+    /**
+     * Create the calldata for wrap and then invoke the call on the CKToken.
+     */
+    function _createWrapDataAndInvoke(
+        ICKToken _ckToken,
+        IWrapAdapter _wrapAdapter,
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _notionalUnderlying
+    ) internal {
+        (
+            address callTarget,
+            uint256 callValue,
+            bytes memory callByteData
+        ) = _wrapAdapter.getWrapCallData(
+            _underlyingToken,
+            _wrappedToken,
+            _notionalUnderlying
+        );
+
+        _ckToken.invoke(callTarget, callValue, callByteData);
+    }
+
+    /**
+     * Create the calldata for unwrap and then invoke the call on the CKToken.
+     */
+    function _createUnwrapDataAndInvoke(
+        ICKToken _ckToken,
+        IWrapAdapter _wrapAdapter,
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _notionalUnderlying
+    ) internal {
+        (
+            address callTarget,
+            uint256 callValue,
+            bytes memory callByteData
+        ) = _wrapAdapter.getUnwrapCallData(
+            _underlyingToken,
+            _wrappedToken,
+            _notionalUnderlying
+        );
+
+        _ckToken.invoke(callTarget, callValue, callByteData);
     }
 }

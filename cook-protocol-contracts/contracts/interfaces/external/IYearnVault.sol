@@ -21,4 +21,10 @@ pragma solidity 0.6.10;
 interface IYearnVault {
     function token() external view returns(address);
     function pricePerShare() external view returns(uint256);
+    function decimals() external view returns (uint256);
+    function deposit(uint256 _amount) external returns (uint256);
+    function withdraw(uint256 _amount) external returns (uint256);
+    function deposit() external returns (uint256);
+    function withdraw() external returns (uint256);
+
 }

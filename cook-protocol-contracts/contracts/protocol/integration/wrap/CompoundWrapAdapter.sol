@@ -21,6 +21,7 @@ pragma experimental "ABIEncoderV2";
 
 import { ICErc20 } from "../../../interfaces/external/ICErc20.sol";
 import { Compound } from "../lib/Compound.sol";
+import { PreciseUnitMath } from "../../../lib/PreciseUnitMath.sol";
 
 /**
  * @title CompoundWrapAdapter
@@ -29,10 +30,11 @@ import { Compound } from "../lib/Compound.sol";
  * Wrap adapter for Compound that returns data for wraps/unwraps of tokens
  */
 contract CompoundWrapAdapter {
-  using Compound for ICErc20;
+    using Compound for ICErc20;
+    using PreciseUnitMath for uint256;
 
 
-  /* ============ Constants ============ */
+    /* ============ Constants ============ */
 
     // Compound Mock address to indicate ETH. ETH is used directly in Compound protocol (instead of an abstraction such as WETH)
     address public constant ETH_TOKEN_ADDRESS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
@@ -94,6 +96,48 @@ contract CompoundWrapAdapter {
     {
         ( , , bytes memory callData) = ICErc20(_wrappedToken).getRedeemCalldata(_wrappedTokenUnits);
         return (_wrappedToken, 0, callData);
+    }
+
+    /**
+     * Get total quantity of underlying token to get the specific amount of the wrapped token.
+     *
+     * @param _underlyingToken      Address of the component to be wrapped
+     * @param _wrappedToken         Address of the desired wrapped token
+     * @param _wrappedTokenAmount   Amount of wrapped token to get
+     *
+     * @return uint256              Total quantity of underlying units to deposit
+     */
+    function getDepositUnderlyingTokenAmount(
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _wrappedTokenAmount
+    )
+        external
+        view
+        returns (uint256)
+    {
+        return _wrappedTokenAmount.preciseMul(ICErc20(_wrappedToken).exchangeRateStored());
+    }
+
+    /**
+     * Get total quantity of underlying token to be returned when withdraw the wrapped token.
+     *
+     * @param _underlyingToken      Address of the component to be returned
+     * @param _wrappedToken         Address of the desired wrapped token
+     * @param _wrappedTokenAmount   Amount of wrapped token to withdraw
+     *
+     * @return uint256              Total quantity of underlying units to be returned
+     */
+    function getWithdrawUnderlyingTokenAmount(
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _wrappedTokenAmount
+    )
+        external
+        view
+        returns (uint256)
+    {
+        return _wrappedTokenAmount.preciseMul(ICErc20(_wrappedToken).exchangeRateStored());
     }
 
     /**

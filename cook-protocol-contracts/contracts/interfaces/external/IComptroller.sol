@@ -12,6 +12,8 @@
     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
     See the License for the specific language governing permissions and
     limitations under the License.
+
+    SPDX-License-Identifier: Apache License, Version 2.0
 */
 
 pragma solidity 0.6.10;
@@ -46,4 +48,8 @@ interface IComptroller {
     function getAllMarkets() external view returns (ICErc20[] memory);
 
     function claimComp(address holder) external;
+
+    function compAccrued(address holder) external view returns (uint);
+
+    function getCompAddress() external view returns (address);
 }

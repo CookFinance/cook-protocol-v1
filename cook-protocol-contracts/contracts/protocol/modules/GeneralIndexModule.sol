@@ -575,9 +575,12 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
         onlyValidAndInitializedCK(_ckToken)
         returns (bool, uint256)
     {
-        require(_ckToken.isComponent(address(_component)), "Component not recognized");
+        require(
+            rebalanceInfo[_ckToken].rebalanceComponents.contains(address(_component)),
+            "Component not recognized"
+        );
         uint256 totalSupply = _ckToken.totalSupply();
-        return _calculateTradeSizeAndDirection(_ckToken, _component, totalSupply);
+        return calculateTradeSizeAndDirection(_ckToken, _component, totalSupply);
     }
 
 
@@ -667,7 +670,7 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
      * throw when attempting to remove a non-element and it's possible someone can set a new
      * trader's status to false.
      *
-     * @param _ckToken                         Instance of the SetToken
+     * @param _ckToken                          Instance of the CKToken
      * @param _trader                           Trader whose permission is being set
      * @param _status                           Boolean permission being set
      */
@@ -770,7 +773,7 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
             (
                 tradeInfo.isSendTokenFixed,
                 tradeInfo.totalFixedQuantity
-            ) = _calculateTradeSizeAndDirection(_ckToken, _component, tradeInfo.ckTotalSupply);
+            ) = calculateTradeSizeAndDirection(_ckToken, _component, tradeInfo.ckTotalSupply);
         }
 
         if (tradeInfo.isSendTokenFixed){
@@ -876,12 +879,12 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
      * @return isSendTokenFixed         Boolean indicating fixed asset is send token
      * @return totalFixedQuantity       Amount of fixed token to send or receive
      */
-    function _calculateTradeSizeAndDirection(
+    function calculateTradeSizeAndDirection(
         ICKToken _ckToken,
         IERC20 _component,
         uint256 _totalSupply
     )
-        internal
+        public
         view
         returns (bool isSendTokenFixed, uint256 totalFixedQuantity)
     {
@@ -913,7 +916,7 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
     /**
      * Check if all targets are met.
      *
-     * @param _ckToken             Instance of the SetToken to be rebalanced
+     * @param _ckToken             Instance of the CKToken to be rebalanced
      *
      * @return bool                 True if all component's target units have been met, otherwise false
      */
@@ -930,7 +933,7 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
      * Checks if sell conditions are met. The component cannot be WETH and its normalized target
      * unit must be less than its default position real unit
      *
-     * @param _ckToken                         Instance of the SetToken to be rebalanced
+     * @param _ckToken                         Instance of the CKToken to be rebalanced
      * @param _component                        Component evaluated for sale
      *
      * @return bool                             True if sell allowed, false otherwise
@@ -946,13 +949,13 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
     }    
 
     /**
-     * Determine if passed address is allowed to call trade for the SetToken. If anyoneTrade set to true anyone can call otherwise
+     * Determine if passed address is allowed to call trade for the CKToken. If anyoneTrade set to true anyone can call otherwise
      * needs to be approved.
      *
-     * @param _ckToken             Instance of SetToken to be rebalanced
+     * @param _ckToken             Instance of CKToken to be rebalanced
      * @param  _trader              Address of the trader who called contract function
      *
-     * @return bool                 True if trader is an approved trader for the SetToken
+     * @return bool                 True if trader is an approved trader for the CKToken
      */
     function _isAllowedTrader(ICKToken _ckToken, address _trader) internal view returns (bool) {
         TradePermissionInfo storage permissions = permissionInfo[_ckToken];
@@ -977,11 +980,11 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
 
     /**
      * Determines if a target is met. Due to small rounding errors converting between virtual and
-     * real unit on SetToken we allow for a 1 wei buffer when checking if target is met. In order to
+     * real unit on CKToken we allow for a 1 wei buffer when checking if target is met. In order to
      * avoid subtraction overflow errors targetUnits of zero check for an exact amount. WETH is not
      * checked as it is allowed to float around its target.
      *
-     * @param _ckToken                         Instance of the SetToken to be rebalanced
+     * @param _ckToken                         Instance of the CKToken to be rebalanced
      * @param _component                        Component whose target is evaluated
      *
      * @return bool                             True if component's target units are met, false otherwise
@@ -1001,7 +1004,7 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
      * Validate component position unit has not exceeded it's target unit. This is used during tradeRemainingWETH() to make sure
      * the amount of component bought does not exceed the targetUnit.
      *
-     * @param _ckToken         Instance of the SetToken
+     * @param _ckToken          Instance of the CKToken
      * @param _component        IERC20 component whose position units are to be validated
      */
     function _validateComponentPositionUnit(ICKToken _ckToken, IERC20 _component) internal view {
@@ -1014,7 +1017,7 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
      * Validate that component is a valid component and enough time has elapsed since component's last trade. Traders
      * cannot explicitly trade WETH, it may only implicitly be traded by being the quote asset for other component trades.
      *
-     * @param _ckToken         Instance of the SetToken
+     * @param _ckToken         Instance of the CKToken
      * @param _component        IERC20 component to be validated
      */
     function _validateTradeParameters(ICKToken _ckToken, IERC20 _component) internal view virtual {
@@ -1085,7 +1088,7 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
      * IntegrationRegistry. This method is called during a trade and must validate the adapter
      * because its state may have changed since it was set in a separate transaction.
      *
-     * @param _ckToken                         Instance of the SetToken to be rebalanced
+     * @param _ckToken                         Instance of the CKToken to be rebalanced
      * @param _component                        IERC20 component whose exchange adapter is fetched
      *
      * @return IExchangeAdapter                 Adapter address
@@ -1097,7 +1100,7 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
 /**
      * Calculates and returns the normalized target unit value.
      *
-     * @param _ckToken             Instance of the SetToken to be rebalanced
+     * @param _ckToken             Instance of the CKToken to be rebalanced
      * @param _component            IERC20 component whose normalized target unit is required
      *
      * @return uint256                          Normalized target unit of the component
@@ -1115,14 +1118,14 @@ contract GeneralIndexModule is ModuleBase, ReentrancyGuard {
      * to calculate the trade size and direction for regular trades and the `sendQuantity` for
      * remainingWEth trades.
      *
-     * @param _ckToken                 Instance of the SetToken to rebalance
+     * @param _ckToken                  Instance of the CKToken to rebalance
      * @param _component                IERC20 component to calculate notional amounts for
-     * @param _totalSupply              SetToken total supply
+     * @param _totalSupply              CKToken total supply
      *
      * @return uint256              Current default position real unit of component
      * @return uint256              Normalized unit of the trade target
-     * @return uint256              Current notional amount: total notional amount of SetToken default position
-     * @return uint256              Target notional amount: Total SetToken supply * targetUnit
+     * @return uint256              Current notional amount: total notional amount of CKToken default position
+     * @return uint256              Target notional amount: Total CKToken supply * targetUnit
      */
     function _getUnitsAndNotionalAmounts(ICKToken _ckToken, IERC20 _component, uint256 _totalSupply)
         internal

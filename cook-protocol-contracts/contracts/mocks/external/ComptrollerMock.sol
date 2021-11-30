@@ -22,10 +22,11 @@ import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { ICErc20 } from "../../interfaces/external/ICErc20.sol";
 
 contract ComptrollerMock {
-    address comp;
-    uint256 compAmount;
-    address ckToken;
+    address public comp;
+    uint256 public compAmount;
+    address public ckToken;
     ICErc20[] public allMarkets;
+    mapping(address => uint) public compAccrued;
 
     constructor(address _comp, uint256 _compAmount, address _collateralCToken) public {
         comp = _comp;
@@ -48,14 +49,22 @@ contract ComptrollerMock {
     }
 
     // Return empty array
-    function enterMarkets(address[] memory _cTokens) public returns (uint256[] memory) {
+    function enterMarkets(address[] memory _cTokens) public pure returns (uint256[] memory) {
         return new uint256[](_cTokens.length);
     }
 
     function claimComp(address _holder) public {
-        require(ERC20(comp).transfer(ckToken, compAmount), "ERC20 transfer failed");
+        require(ERC20(comp).transfer(_holder, compAccrued[_holder]), "ERC20 transfer failed");
 
         // Used to silence compiler warnings
         _holder;
+    }
+
+    function setCompAccrued(address _holder, uint _compAmount) external {
+        compAccrued[_holder] = _compAmount;
+    }
+
+    function getCompAddress() external view returns (address) {
+        return comp;
     }
 }

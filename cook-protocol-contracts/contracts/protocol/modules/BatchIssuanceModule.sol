@@ -53,24 +53,19 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
 
     event CKTokenBatchIssued(
         ICKToken indexed _ckToken,
-        address _issuer,
-        address _to,
-        address _reserveAsset,
-        uint256 _ckTokenQuantity,
-        uint256 _managerFee,
-        uint256 _premium
+        uint256 _inputUsed,
+        uint256 _outputCK,
+        uint256 _roundNumber
     );
     event ManagerFeeEdited(ICKToken indexed _ckToken, uint256 _newManagerFee, uint256 _index);
     event FeeRecipientEdited(ICKToken indexed _ckToken, address _feeRecipient);
-    event RoundInputCapEdited(uint256 _oldRoundInputCap, uint256 _newRoundInputCap);
     event AssetExchangeUpdated(ICKToken indexed _ckToken, address _component, string _newExchangeName);
-    event Deposit(address indexed _to, uint256 _amount);
-    event Withdraw(
+    event Deposit(ICKToken indexed _ckToken, address _to, uint256 _amount, uint256 _round);
+    event WithdrawCKToken(
         ICKToken indexed _ckToken,
         address indexed _from,
         address indexed _to,
-        uint256 _inputAmount,
-        uint256 _outputAmount
+        uint256 _amount
     );
 
     /* ============ Structs ============ */
@@ -108,11 +103,9 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
         bytes exchangeData;                         // Arbitrary data for executing trade on given exchange
     }
 
-    struct Round {
-        uint256 totalDeposited;                     // Total WETH deposited in a round
-        mapping(address => uint256) deposits;       // Mapping address to uint256, shows which address deposited how much WETH
-        uint256 totalBakedInput;                    // Total WETH used for issuance in a round
-        uint256 totalOutput;                        // Total CK amount issued in a round
+    struct RoundInfo {
+        uint256 totalEthDeposited;                  // total deposited ETH amount in a round
+        uint256 totalCkTokenIssued;                 // total issed ckToken in a round
     }
 
     /* ============ Constants ============ */
@@ -128,16 +121,17 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
 
     IWETH public immutable weth;                        // Wrapped ETH address
     IBasicIssuanceModule public basicIssuanceModule;    // Basic Issuance Module
+    
     // Mapping of CKToken to Batch issuance setting
     mapping(ICKToken => BatchIssuanceSetting) private batchIssuanceSettings;
     // Mapping of CKToken to (component to execution params)
     mapping(ICKToken => mapping(IERC20 => TradeExecutionParams)) private tradeExecutionInfo;
-    // Mapping of CKToken to Input amount size per round
-    mapping(ICKToken => uint256) private roundInputCaps;
-    // Mapping of CKToken to Array of rounds
-    mapping(ICKToken => Round[]) private rounds;
-    // Mapping of CKToken to User round, a user can have multiple rounds
-    mapping(ICKToken => mapping(address => uint256[])) private userRounds;
+    // Mapping of CKToken to onoing batch issue round for deposit
+    mapping(ICKToken => uint256) public roundNumbers;
+    // Mapping of CKToken to round info
+    mapping(ICKToken => mapping(uint256 => RoundInfo)) public roundInfos;
+    // Mapping of CKToken to user deposit in a round, key is hashed by keccak256(user_address, round number)
+    mapping(ICKToken => mapping(bytes32 => uint256)) public userDeposits;
 
     /* ============ Constructor ============ */
 
@@ -165,12 +159,10 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
      *
      * @param _ckToken              Instance of the CKToken to issue
      * @param _batchIssuanceSetting BatchIssuanceSetting struct define parameters
-     * @param _roundInputCap        Maximum input amount per round
      */
     function initialize(
         ICKToken _ckToken,
-        BatchIssuanceSetting memory _batchIssuanceSetting,
-        uint256 _roundInputCap
+        BatchIssuanceSetting memory _batchIssuanceSetting
     )
         external
         onlyCKManager(_ckToken, msg.sender)
@@ -183,10 +175,8 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
         require(_batchIssuanceSetting.feeRecipient != address(0), "Fee Recipient must be non-zero address.");
         require(_batchIssuanceSetting.minCKTokenSupply > 0, "Min CKToken supply must be greater than 0");
 
-        // create first empty round
-        rounds[_ckToken].push();
-        // set round input limit
-        roundInputCaps[_ckToken] = _roundInputCap;
+        // assgin the first round
+        roundNumbers[_ckToken] = 0;
 
         // set batch issuance setting
         batchIssuanceSettings[_ckToken] = _batchIssuanceSetting;
@@ -271,28 +261,12 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
      * The exact amount protocol fee will be deliver to the protocol. Only remaining WETH will be paid to the manager as a fee.
      *
      * @param _ckToken                      Instance of the CKToken
-     * @param _rounds                       Array of round indexes
      */
-    function batchIssue(
-        ICKToken _ckToken, uint256[] memory _rounds
-    ) 
-        external
-        nonReentrant
-        onlyValidAndInitializedCK(_ckToken)
-    {
-        uint256 maxInputAmount;
-        Round[] storage roundsPerCK = rounds[_ckToken];
+    function batchIssue(ICKToken _ckToken) external nonReentrant onlyValidAndInitializedCK(_ckToken) {
         // Get max input amount
-        for(uint256 i = 0; i < _rounds.length; i ++) {
-        
-            // Prevent round from being baked twice
-            if(i != 0) {
-                require(_rounds[i] > _rounds[i - 1], "Rounds out of order");
-            }
-
-            Round storage round = roundsPerCK[_rounds[i]];
-            maxInputAmount = maxInputAmount.add(round.totalDeposited.sub(round.totalBakedInput));
-        }
+        uint256 currentRound = roundNumbers[_ckToken];
+        RoundInfo storage roundInfo = roundInfos[_ckToken][currentRound];
+        uint256 maxInputAmount = roundInfo.totalEthDeposited;
 
         require(maxInputAmount > 0, "Quantity must be > 0");
 
@@ -331,30 +305,8 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
 
         // Mint the CKToken
         basicIssuanceModule.issue(_ckToken, outputAmount, address(this));
-
-        uint256 inputUsedRemaining = maxInputAmount;
-
-        for(uint256 i = 0; i < _rounds.length; i ++) {
-            Round storage round = roundsPerCK[_rounds[i]];
-
-            uint256 roundTotalBaked = round.totalBakedInput;
-            uint256 roundTotalDeposited = round.totalDeposited;
-            uint256 roundInputBaked = (roundTotalDeposited.sub(roundTotalBaked)).min(inputUsedRemaining);
-
-            // Skip round if it is already baked
-            if(roundInputBaked == 0) {
-                continue;
-            }
-
-            uint256 roundOutputBaked = outputAmount.mul(roundInputBaked).div(maxInputAmount);
-
-            round.totalBakedInput = roundTotalBaked.add(roundInputBaked);
-            inputUsedRemaining = inputUsedRemaining.sub(roundInputBaked);
-            round.totalOutput = round.totalOutput.add(roundOutputBaked);
-
-            // Sanity check for round
-            require(round.totalBakedInput <= round.totalDeposited, "Round input sanity check failed");
-        }
+        // Mark total minted CKToken amount;
+        roundInfo.totalCkTokenIssued = outputAmount;
 
         // Sanity check
         uint256 inputUsedWithProtocolFee = inputUsed.add(issueInfo.protocolFees);
@@ -363,6 +315,11 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
         // turn remaining amount into manager fee
         issueInfo.managerFee = maxInputAmount.sub(inputUsedWithProtocolFee);
         _transferFees(_ckToken, issueInfo);
+
+        emit CKTokenBatchIssued(_ckToken, maxInputAmount, outputAmount, currentRound);
+
+        // round move forward
+        roundNumbers[_ckToken] = currentRound.add(1);
     }
 
     /**
@@ -387,80 +344,50 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
     }
 
     /**
-     * Withdraw within the number of rounds limit
+     * Withdraw CKToken
      *
      * @param _ckToken                      Instance of the CKToken
-     * @param _roundsLimit                  Number of rounds limit
      */
-    function withdraw(ICKToken _ckToken, uint256 _roundsLimit) external onlyValidAndInitializedCK(_ckToken) {
-        withdrawTo(_ckToken, msg.sender, _roundsLimit);
+    function withdrawCKToken(ICKToken _ckToken) external onlyValidAndInitializedCK(_ckToken) {
+        withdrawCKTokenTo(_ckToken, msg.sender);
     }
 
     /**
-     * Withdraw within the number of rounds limit, to a specific address
+     * Withdraw CKToken within to a specific address
      *
      * @param _ckToken                      Instance of the CKToken
      * @param _to                           Address to withdraw to
-     * @param _roundsLimit                  Number of rounds limit
      */
-    function withdrawTo(
+    function withdrawCKTokenTo(
         ICKToken _ckToken,
-        address _to,
-        uint256 _roundsLimit
+        address _to
     ) public nonReentrant onlyValidAndInitializedCK(_ckToken) {
-        uint256 inputAmount;
-        uint256 outputAmount;
+        uint256 totalWithdrawablwAmount = 0;
+        uint256 currentRound = roundNumbers[_ckToken];
 
-        mapping(address => uint256[]) storage userRoundsPerCK = userRounds[_ckToken];
-        Round[] storage roundsPerCK = rounds[_ckToken];
-        uint256 userRoundsLength = userRoundsPerCK[msg.sender].length;
-        uint256 numRounds = userRoundsLength.min(_roundsLimit);
+        for (uint256 i = 0; i < currentRound; i++) {
+            bytes32 userRoundHash = _getUserRoundHash(_to, i);
+            RoundInfo storage roundInfo = roundInfos[_ckToken][i];
+            uint256 userDepositAmount = userDeposits[_ckToken][userRoundHash];
 
-        for(uint256 i = 0; i < numRounds; i ++) {
-            // start at end of array for efficient popping of elements
-            uint256 userRoundIndex = userRoundsLength.sub(i).sub(1);
-            uint256 roundIndex = userRoundsPerCK[msg.sender][userRoundIndex];
-            Round storage round = roundsPerCK[roundIndex];
-
-            // amount of input of user baked
-            uint256 bakedInput = round.deposits[msg.sender].mul(round.totalBakedInput).div(round.totalDeposited);
-
-            // amount of output the user is entitled to
-            uint256 userRoundOutput;
-            if(bakedInput == 0) {
-                userRoundOutput = 0;
-            } else {
-                userRoundOutput = round.totalOutput.mul(bakedInput).div(round.totalBakedInput);
+            // skip if user has no deposit, all ckToken withdraw or ckTokens not even issued
+            if (userDepositAmount == 0 || roundInfo.totalEthDeposited == 0 || roundInfo.totalCkTokenIssued == 0) {
+                continue;
             }
-            // unbaked input
-            uint256 unspentInput = round.deposits[msg.sender].sub(bakedInput);
-            inputAmount = inputAmount.add(unspentInput);
-            //amount of output the user is entitled to
-            outputAmount = outputAmount.add(userRoundOutput);
 
-            round.totalDeposited = round.totalDeposited.sub(round.deposits[msg.sender]);
-            round.deposits[msg.sender] = 0;
-            round.totalBakedInput = round.totalBakedInput.sub(bakedInput);
+            uint256 withdrawablwAmount = roundInfo.totalCkTokenIssued.mul(userDepositAmount).div(roundInfo.totalEthDeposited);
 
-            round.totalOutput = round.totalOutput.sub(userRoundOutput);
+            roundInfo.totalEthDeposited = roundInfo.totalEthDeposited.sub(userDeposits[_ckToken][userRoundHash]);
+            roundInfo.totalCkTokenIssued = roundInfo.totalCkTokenIssued.sub(withdrawablwAmount);
+            userDeposits[_ckToken][userRoundHash] = 0;
 
-            // pop of user round
-            userRoundsPerCK[msg.sender].pop();
+            totalWithdrawablwAmount = totalWithdrawablwAmount.add(withdrawablwAmount);
         }
 
-        if(inputAmount != 0) {
-            // handle rounding issues due to integer division inaccuracies
-            inputAmount = inputAmount.min(weth.balanceOf(address(this)));
-            weth.safeTransfer(_to, inputAmount);
-        }
-        
-        if(outputAmount != 0) {
-            // handle rounding issues due to integer division inaccuracies
-            outputAmount = outputAmount.min(_ckToken.balanceOf(address(this)));
-            _ckToken.transfer(_to, outputAmount);
-        }
+        require(totalWithdrawablwAmount > 0, "no claimable ckToken");
 
-        emit Withdraw(_ckToken, msg.sender, _to, inputAmount, outputAmount);
+        _ckToken.transfer(_to, totalWithdrawablwAmount);
+        emit WithdrawCKToken(_ckToken, msg.sender, _to, totalWithdrawablwAmount);
     }
 
     /**
@@ -476,151 +403,67 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
         }
 
         delete batchIssuanceSettings[ckToken_];
-        delete roundInputCaps[ckToken_];
-        delete rounds[ckToken_];
+        // delete roundInfos[ckToken_];
         // delete userRounds[ckToken_];
     }
 
     /* ============ External Getter Functions ============ */
 
     /**
-     * Get current round index
+     * Get deposited ETH waiting for batchIssue
      *
      * @param _ckToken                      Instance of the CKToken
+     * @param _of                           address of the user
      */
-    function getRoundInputCap(ICKToken _ckToken) public view returns(uint256) {
-        return roundInputCaps[_ckToken];
+     function inputBalanceOf(ICKToken _ckToken, address _of) public view returns(uint256) {
+        uint256 currentRound = roundNumbers[_ckToken];
+        bytes32 userRoundHash = _getUserRoundHash(_of, currentRound);
+        return userDeposits[_ckToken][userRoundHash];
     }
 
     /**
-     * Get current round index
+     * Get batch issued ckToken of an address
+     *
+     * @param _ckToken                      Instance of the CKToken
+     * @param _of                           address of the user
+     */
+    function outputBalanceOf(ICKToken _ckToken, address _of) public view returns(uint256) {
+        uint256 currentRound = roundNumbers[_ckToken];
+        uint256 totalWithdrawablwAmount = 0;
+
+        for (uint256 i = 0; i < currentRound; i++) {
+            bytes32 userRoundHash = _getUserRoundHash(_of, i);
+            RoundInfo memory roundInfo = roundInfos[_ckToken][i];
+            uint256 userDepositAmount = userDeposits[_ckToken][userRoundHash];
+
+            // skip if user has no deposit, all ckToken withdraw or ckTokens not even issued
+            if (userDepositAmount == 0 || roundInfo.totalEthDeposited == 0 || roundInfo.totalCkTokenIssued == 0) {
+                continue;
+            }
+
+            uint256 withdrawablwAmount = roundInfo.totalCkTokenIssued.mul(userDepositAmount).div(roundInfo.totalEthDeposited);
+            totalWithdrawablwAmount = totalWithdrawablwAmount.add(withdrawablwAmount);
+        }        
+
+        return totalWithdrawablwAmount;
+    }
+
+    /**
+     * Get current batch issue round number 
      *
      * @param _ckToken                      Instance of the CKToken
      */
     function getCurrentRound(ICKToken _ckToken) public view returns(uint256) {
-        return rounds[_ckToken].length.sub(1);
+        return roundNumbers[_ckToken];
     }
 
     /**
-     * Get un-baked round indexes
+     * Get current batch issue round deposited eth
      *
      * @param _ckToken                      Instance of the CKToken
      */
-    function getRoundsToBake(ICKToken _ckToken) external view returns(uint256[] memory) {
-        uint256 count = 0;
-        Round[] storage roundsPerCK = rounds[_ckToken];
-        for(uint256 i = 0; i < roundsPerCK.length; i ++) {
-            Round storage round = roundsPerCK[i];
-            if (round.totalBakedInput == 0) {
-                count ++;
-            }
-        }
-        uint256[] memory roundsToBake = new uint256[](count);
-        uint256 focus = 0;
-        for(uint256 i = 0; i < roundsPerCK.length; i ++) {
-            Round storage round = roundsPerCK[i];
-            if (round.totalBakedInput == 0) {
-                roundsToBake[focus] = i;
-                focus ++;
-            }
-        }
-        return roundsToBake;
-    }
-
-    /**
-     * Get round input of an address(user)
-     *
-     * @param _ckToken                      Instance of the CKToken
-     * @param _round                        index of the round
-     * @param _of                           address of the user
-     */
-    function roundInputBalanceOf(ICKToken _ckToken, uint256 _round, address _of) public view returns(uint256) {
-        Round storage round = rounds[_ckToken][_round];
-        // if there are zero deposits the input balance of `_of` would be zero too
-        if(round.totalDeposited == 0) {
-            return 0;
-        }
-        uint256 bakedInput = round.deposits[_of].mul(round.totalBakedInput).div(round.totalDeposited);
-        return round.deposits[_of].sub(bakedInput);
-    }
-
-    /**
-     * Get total input of an address(user)
-     *
-     * @param _ckToken                      Instance of the CKToken
-     * @param _of                           address of the user
-     */
-    function inputBalanceOf(ICKToken _ckToken, address _of) public view returns(uint256) {
-        mapping(address => uint256[]) storage userRoundsPerCK = userRounds[_ckToken];
-        uint256 roundsCount = userRoundsPerCK[_of].length;
-
-        uint256 balance;
-
-        for(uint256 i = 0; i < roundsCount; i ++) {
-            balance = balance.add(roundInputBalanceOf(_ckToken, userRoundsPerCK[_of][i], _of));
-        }
-
-        return balance;
-    }
-
-    /**
-     * Get round output of an address(user)
-     *
-     * @param _ckToken                      Instance of the CKToken
-     * @param _round                        index of the round
-     * @param _of                           address of the user
-     */
-    function roundOutputBalanceOf(ICKToken _ckToken, uint256 _round, address _of) public view returns(uint256) {
-        Round storage round = rounds[_ckToken][_round];
-
-        if(round.totalBakedInput == 0) {
-            return 0;
-        }
-
-        // amount of input of user baked
-        uint256 bakedInput = round.deposits[_of].mul(round.totalBakedInput).div(round.totalDeposited);
-        // amount of output the user is entitled to
-        uint256 userRoundOutput = round.totalOutput.mul(bakedInput).div(round.totalBakedInput);
-
-        return userRoundOutput;
-    }
-
-    /**
-     * Get total output of an address(user)
-     *
-     * @param _ckToken                      Instance of the CKToken
-     * @param _of                           address of the user
-     */
-    function outputBalanceOf(ICKToken _ckToken, address _of) external view returns(uint256) {
-        mapping(address => uint256[]) storage userRoundsPerCK = userRounds[_ckToken];
-        uint256 roundsCount = userRoundsPerCK[_of].length;
-
-        uint256 balance;
-
-        for(uint256 i = 0; i < roundsCount; i ++) {
-            balance = balance.add(roundOutputBalanceOf(_ckToken, userRoundsPerCK[_of][i], _of));
-        }
-
-        return balance;
-    }
-
-    /**
-     * Get user's round count
-     *
-     * @param _ckToken                      Instance of the CKToken
-     * @param _user                         address of the user
-     */
-    function getUserRoundsCount(ICKToken _ckToken, address _user) external view returns(uint256) {
-        return userRounds[_ckToken][_user].length;
-    }
-
-    /**
-     * Get total round count
-     *
-     * @param _ckToken                      Instance of the CKToken
-     */
-    function getRoundsCount(ICKToken _ckToken) external view returns(uint256) {
-        return rounds[_ckToken].length;
+    function getCurrentRoundDeposited(ICKToken _ckToken) public view returns(uint256) {
+        return roundInfos[_ckToken][roundNumbers[_ckToken]].totalEthDeposited;
     }
 
     /**
@@ -658,7 +501,7 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
     /* ============ Internal Functions ============ */
 
     /**
-     * Deposit by user by round
+     * Deposit by user
      *
      * @param _ckToken                      Instance of the CKToken
      * @param _amount                       Amount of WETH
@@ -670,45 +513,13 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
             return;
         }
 
-        Round[] storage roundsPerCK = rounds[_ckToken];
-        uint256 currentRound = getCurrentRound(_ckToken);
-        uint256 deposited = 0;
+        uint256 currentRound = roundNumbers[_ckToken];
+        bytes32 userRoundHash = _getUserRoundHash(_to, currentRound);
+        
+        roundInfos[_ckToken][currentRound].totalEthDeposited = roundInfos[_ckToken][currentRound].totalEthDeposited.add(_amount);
+        userDeposits[_ckToken][userRoundHash] = userDeposits[_ckToken][userRoundHash].add(_amount);
 
-        while(deposited < _amount) {
-            //if the current round does not exist create it
-            if(currentRound >= roundsPerCK.length) {
-                roundsPerCK.push();
-            }
-
-            //if the round is already partially baked create a new round
-            if(roundsPerCK[currentRound].totalBakedInput != 0) {
-                currentRound = currentRound.add(1);
-                roundsPerCK.push();
-            }
-
-            Round storage round = roundsPerCK[currentRound];
-
-            uint256 roundDeposit = (_amount.sub(deposited)).min(roundInputCaps[_ckToken].sub(round.totalDeposited));
-
-            round.totalDeposited = round.totalDeposited.add(roundDeposit);
-            round.deposits[_to] = round.deposits[_to].add(roundDeposit);
-
-            deposited = deposited.add(roundDeposit);
-
-            // only push roundsPerCK we are actually in
-            if(roundDeposit != 0) {
-                _pushUserRound(_ckToken, _to, currentRound);
-            }
-
-            // if full amount assigned to roundsPerCK break the loop
-            if(deposited == _amount) {
-                break;
-            }
-
-            currentRound = currentRound.add(1);
-        }
-
-        emit Deposit(_to, _amount);
+        emit Deposit(_ckToken, _to, _amount, currentRound);
     }
 
     /**
@@ -879,21 +690,6 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
     }
 
     /**
-     * Add new roundId to user's rounds array
-     *
-     * @param _ckToken                  Instance of the CKToken
-     * @param _to                       Address of depositor
-     * @param _roundId                  Round id to add in userRounds
-     */
-    function _pushUserRound(ICKToken _ckToken, address _to, uint256 _roundId) internal {
-        // only push when its not already added
-        mapping(address => uint256[]) storage userRoundsPerCK = userRounds[_ckToken];
-        if(userRoundsPerCK[_to].length == 0 || userRoundsPerCK[_to][userRoundsPerCK[_to].length - 1] != _roundId) {
-            userRoundsPerCK[_to].push(_roundId);
-        }
-    }
-
-    /**
      * Returns the fees attributed to the manager and the protocol. The fees are calculated as follows:
      *
      * ManagerFee = (manager fee % - % to protocol) * reserveAssetQuantity, will be recalculated after trades
@@ -901,9 +697,9 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
      *
      * @param _ckToken                      Instance of the CKToken
      * @param _reserveAssetQuantity         Quantity of reserve asset to calculate fees from
-     * @param _protocolManagerFeeIndex      Index to pull rev share NAV Issuance fee from the Controller
-     * @param _protocolDirectFeeIndex       Index to pull direct NAV issuance fee from the Controller
-     * @param _managerFeeIndex              Index from NAVIssuanceSettings (0 = issue fee, 1 = redeem fee)
+     * @param _protocolManagerFeeIndex      Index to pull rev share batch Issuance fee from the Controller
+     * @param _protocolDirectFeeIndex       Index to pull direct batch issuance fee from the Controller
+     * @param _managerFeeIndex              Index from BatchIssuanceSettings (0 = issue fee, 1 = redeem fee)
      *
      * @return  uint256                     Total fee percentage
      * @return  uint256                     Fees paid to the protocol in reserve asset
@@ -941,9 +737,9 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
      * Returns the fee percentages of the manager and the protocol.
      *
      * @param _ckToken                      Instance of the CKToken
-     * @param _protocolManagerFeeIndex      Index to pull rev share NAV Issuance fee from the Controller
-     * @param _protocolDirectFeeIndex       Index to pull direct NAV issuance fee from the Controller
-     * @param _managerFeeIndex              Index from NAVIssuanceSettings (0 = issue fee, 1 = redeem fee)
+     * @param _protocolManagerFeeIndex      Index to pull rev share Batch Issuance fee from the Controller
+     * @param _protocolDirectFeeIndex       Index to pull direct Batc issuance fee from the Controller
+     * @param _managerFeeIndex              Index from BatchIssuanceSettings (0 = issue fee, 1 = redeem fee)
      *
      * @return  uint256                     Fee percentage to the protocol in reserve asset
      * @return  uint256                     Fee percentage to the manager in reserve asset
@@ -1007,5 +803,15 @@ contract BatchIssuanceModule is ModuleBase, ReentrancyGuard {
         if (_issueInfo.managerFee > 0) {
             weth.safeTransfer(batchIssuanceSettings[_ckToken].feeRecipient, _issueInfo.managerFee);
         }
+    }
+
+    /**
+     * Generate hash key with (address, roundnumber) to get user deposit for a CKToken in a specific round.
+     *
+     * @param _account          Address made deposit
+     * @param roundNumber       round an address deposited
+     */
+    function _getUserRoundHash(address _account, uint256 roundNumber) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(_account, roundNumber));
     }
 }

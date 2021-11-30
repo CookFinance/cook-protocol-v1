@@ -19,6 +19,11 @@
 pragma solidity 0.6.10;
 pragma experimental "ABIEncoderV2";
 
+import { SafeMath } from "@openzeppelin/contracts/math/SafeMath.sol";
+
+import "../../../interfaces/external/IUniswapV2Router02.sol";
+import { PreciseUnitMath } from "../../../lib/PreciseUnitMath.sol";
+
 /**
  * @title UniswapV2ExchangeAdapterV2
  * @author Cook Finance
@@ -33,6 +38,8 @@ pragma experimental "ABIEncoderV2";
  *
  */
 contract UniswapV2ExchangeAdapterV2 {
+    using SafeMath for uint256;
+    using PreciseUnitMath for uint256;
 
     /* ============ State Variables ============ */
 
@@ -62,8 +69,6 @@ contract UniswapV2ExchangeAdapterV2 {
      * Note: When selecting the swap for exact tokens function, _sourceQuantity is defined as the max token quantity you are willing to trade, and
      * _minDestinationQuantity is the exact quantity of token you are receiving.
      *
-     * @param  _sourceToken              Address of source token to be sold
-     * @param  _destinationToken         Address of destination token to buy
      * @param  _destinationAddress       Address that assets should be transferred to
      * @param  _sourceQuantity           Fixed/Max amount of source token to sell
      * @param  _destinationQuantity      Min/Fixed amount of destination token to buy
@@ -74,8 +79,8 @@ contract UniswapV2ExchangeAdapterV2 {
      * @return bytes                     Trade calldata
      */
     function getTradeCalldata(
-        address _sourceToken,
-        address _destinationToken,
+        address /* _sourceToken */,
+        address /* _destinationToken */,
         address _destinationAddress,
         uint256 _sourceQuantity,
         uint256 _destinationQuantity,
@@ -84,7 +89,7 @@ contract UniswapV2ExchangeAdapterV2 {
         external
         view
         returns (address, uint256, bytes memory)
-    {   
+    {
         (
             address[] memory path,
             bool shouldSwapExactTokensForTokens
@@ -104,21 +109,17 @@ contract UniswapV2ExchangeAdapterV2 {
     /**
      * Generate data parameter to be passed to `getTradeCallData`. Returns encoded trade paths and bool to select trade function.
      *
-     * @param _sourceToken          Address of the source token to be sold        
-     * @param _destinationToken     Address of the destination token to buy
-     * @param _fixIn                Boolean representing if input tokens amount is fixed
+     * @param _path                 Transaction path
+     * @param _isSendTokenFixed     Address of the destination token to buy
      * 
      * @return bytes                Data parameter to be passed to `getTradeCallData`          
      */
-    function generateDataParam(address _sourceToken, address _destinationToken, bool _fixIn)
+    function generateDataParam(address[] memory _path, bool _isSendTokenFixed)
         external
         pure
         returns (bytes memory) 
     {
-        address[] memory path = new address[](2);
-        path[0] = _sourceToken;
-        path[1] = _destinationToken;
-        return abi.encode(path, _fixIn);
+        return abi.encode(_path, _isSendTokenFixed);
     }
 
     /**
@@ -137,5 +138,25 @@ contract UniswapV2ExchangeAdapterV2 {
      */
     function getUniswapExchangeData(address[] memory _path, bool _shouldSwapExactTokensForTokens) external pure returns (bytes memory) {
         return abi.encode(_path, _shouldSwapExactTokensForTokens);
+    }
+
+    /**
+     * Helper that returns the the minimum amounts to receive
+     *
+     * @return amounts              minimum amounts to receive for trading on Uniswap
+     */
+    function getMinAmountsOut(uint256 amountIn, address[] memory path) external view returns (uint256[] memory amounts) {
+        amounts = new uint256[](path.length);
+        amounts = IUniswapV2Router02(router).getAmountsOut(amountIn, path);
+    }
+
+    /**
+     * Helper that returns the the maximum amounts to send
+     *
+     * @return amounts              minimum amounts to send for trading on Uniswap
+     */
+    function getMaxAmountsIn(uint256 amountOut, address[] memory path) external view returns (uint256[] memory amounts) {
+        amounts = new uint256[](path.length);
+        amounts = IUniswapV2Router02(router).getAmountsIn(amountOut, path);
     }
 } 

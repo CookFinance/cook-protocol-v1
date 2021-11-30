@@ -9,12 +9,15 @@
     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
     See the License for the specific language governing permissions and
     limitations under the License.
+
+    SPDX-License-Identifier: Apache License, Version 2.0
 */
 
 pragma solidity 0.6.10;
 
 import { SafeMath } from "@openzeppelin/contracts/math/SafeMath.sol";
 import { AggregatorV3Interface } from "@chainlink/contracts/src/v0.6/interfaces/AggregatorV3Interface.sol";
+import "../../../interfaces/IOracle.sol";
 
 
 /**
@@ -23,7 +26,7 @@ import { AggregatorV3Interface } from "@chainlink/contracts/src/v0.6/interfaces/
  *
  * Coerces outputs from Chainlink oracles to uint256 and adapts value to 18 decimals.
  */
-contract ChainlinkOracleAdapter {
+contract ChainlinkOracleAdapter is IOracle {
     using SafeMath for uint256;
 
     /* ============ State Variables ============ */
@@ -58,6 +61,7 @@ contract ChainlinkOracleAdapter {
      */
     function read()
         external
+        override
         view
         returns (uint256)
     {

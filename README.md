@@ -1,6 +1,6 @@
 # Cook Index
 
-Cook Index contracts consists two main parts - Cook Protocol and Index Coop
+Cook Protocol core contracts
 
 ## Cook Protocol
 

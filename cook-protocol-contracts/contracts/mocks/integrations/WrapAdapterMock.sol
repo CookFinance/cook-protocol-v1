@@ -43,25 +43,28 @@ contract WrapAdapterMock is ERC20 {
      */
     function deposit(address _underlyingToken, uint256 _underlyingQuantity) payable external {
         // Do a transferFrom of the underlyingToken
+        uint256 unitDecimals = 1;
         if (_underlyingToken != ETH_TOKEN_ADDRESS) {
+            unitDecimals = 10 ** (18 - uint256(ERC20(_underlyingToken).decimals()));
             IERC20(_underlyingToken).transferFrom(msg.sender, address(this), _underlyingQuantity);
         }
 
-        _mint(msg.sender, _underlyingQuantity);
+        _mint(msg.sender, _underlyingQuantity * unitDecimals);
     }
 
     /**
      * Burns tokens from the sender of the wrapped asset and returns the underlying
      */
-    function withdraw(address _underlyingToken, uint256 _underlyingQuantity) external {
+    function withdraw(address _underlyingToken, uint256 _wrappedQuantity) external {
         // Transfer the underlying to the sender
         if (_underlyingToken == ETH_TOKEN_ADDRESS) {
-            msg.sender.transfer(_underlyingQuantity);
+            msg.sender.transfer(_wrappedQuantity);
         } else {
-            IERC20(_underlyingToken).transfer(msg.sender, _underlyingQuantity);
+            uint256 unitDecimals = ERC20(_underlyingToken).decimals();
+            IERC20(_underlyingToken).transfer(msg.sender, _wrappedQuantity / (10 ** (18 - unitDecimals)));
         }
 
-        _burn(msg.sender, _underlyingQuantity);
+        _burn(msg.sender, _wrappedQuantity);
     }
 
     /**
@@ -79,11 +82,19 @@ contract WrapAdapterMock is ERC20 {
 
     function getUnwrapCallData(
         address _underlyingToken,
-        address _wrappedToken,
+        address /* _wrappedToken */,
         uint256 _wrappedTokenUnits
     ) external view returns (address _subject, uint256 _value, bytes memory _calldata) {
         bytes memory callData = abi.encodeWithSignature("withdraw(address,uint256)", _underlyingToken, _wrappedTokenUnits);
         return (address(this), 0, callData);
+    }
+
+    function getWrapSpenderAddress(address /* _underlyingToken */, address  _wrappedToken) external view returns(address) {
+        return address(this);
+    }
+
+    function getUnwrapSpenderAddress(address /* _underlyingToken */, address  _wrappedToken) external view returns(address) {
+        return address(this);
     }
 
     function getSpenderAddress(
@@ -91,5 +102,33 @@ contract WrapAdapterMock is ERC20 {
         address /* _wrappedToken */
     ) external view returns(address) {
         return address(this);
+    }
+
+    function getDepositUnderlyingTokenAmount(
+        address _underlyingToken,
+        address /* _wrappedToken */,
+        uint256 _wrappedTokenAmount
+    ) external view returns(uint256) {
+        uint256 unitDecimals;
+        if (_underlyingToken == ETH_TOKEN_ADDRESS) {
+            unitDecimals = 18;             
+        } else {
+            unitDecimals = ERC20(_underlyingToken).decimals();
+        }
+        return _wrappedTokenAmount / (10 ** (18 - unitDecimals));
+    }
+
+    function getWithdrawUnderlyingTokenAmount(
+        address _underlyingToken,
+        address /* _wrappedToken */,
+        uint256 _wrappedTokenAmount
+    ) external view returns(uint256) {
+        uint256 unitDecimals;
+        if (_underlyingToken == ETH_TOKEN_ADDRESS) {
+            unitDecimals = 18;             
+        } else {
+            unitDecimals = ERC20(_underlyingToken).decimals();
+        }
+        return _wrappedTokenAmount / (10 ** (18 - unitDecimals));
     }
 }

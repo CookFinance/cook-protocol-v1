@@ -24,7 +24,7 @@ import { SynthMock } from "./SynthMock.sol";
 contract SynthetixExchangerMock {
     using SafeMath for uint;
 
-    bytes32 sUsdCurrencyKey;
+    bytes32 public sUsdCurrencyKey;
     mapping(bytes32 => mapping(bytes32 => uint256)) private rates;
     mapping(bytes32 => address) private coins;
 
@@ -58,13 +58,14 @@ contract SynthetixExchangerMock {
     }
 
     function exchange(
-        address from,
+        address /* from */,
         bytes32 sourceCurrencyKey,
         uint256 sourceAmount,
         bytes32 destinationCurrencyKey,
-        address destinationAddress
+        address /* destinationAddress */
     )
         external
+        view
         returns (uint256 amountReceived)
     {
 
@@ -87,6 +88,7 @@ contract SynthetixExchangerMock {
         bytes32 _destinationCurrencyKey
     )
         public
+        view
         returns (
             uint256 amountReceived,
             uint256 fee,

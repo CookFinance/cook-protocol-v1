@@ -122,7 +122,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 premiumPercentage;                     // Premium percentage (0.01% = 1e14, 1% = 1e16). This premium is a buffer around oracle
                                                        // prices paid by user to the CKToken, which prevents arbitrage and oracle front running
         uint256 maxPremiumPercentage;                  // Maximum premium percentage manager is allowed to ck (configured by manager)
-        uint256 minCKTokenSupply;                     // Minimum CKToken supply required for issuance and redemption 
+        uint256 minCKTokenSupply;                     // Minimum CKToken supply required for issuance and redemption
                                                        // to prevent dramatic inflationary changes to the CKToken's position multiplier
     }
 
@@ -148,7 +148,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
 
     // Mapping of CKToken to NAV issuance settings struct
     mapping(ICKToken => NAVIssuanceSettings) public navIssuanceSettings;
-    
+
     // Mapping to efficiently check a CKToken's reserve asset validity
     // CKToken => reserveAsset => isReserveAsset
     mapping(ICKToken => mapping(address => bool)) public isReserveAsset;
@@ -184,7 +184,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
     }
 
     /* ============ External Functions ============ */
-    
+
     /**
      * Deposits the allowed reserve asset into the CKToken and mints the appropriate % of Net Asset Value of the CKToken
      * to the specified _to address.
@@ -201,13 +201,13 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 _reserveAssetQuantity,
         uint256 _minCKTokenReceiveQuantity,
         address _to
-    ) 
+    )
         external
         nonReentrant
         onlyValidAndInitializedCK(_ckToken)
     {
         _validateCommon(_ckToken, _reserveAsset, _reserveAssetQuantity);
-        
+
         _callPreIssueHooks(_ckToken, _reserveAsset, _reserveAssetQuantity, msg.sender, _to);
 
         ActionInfo memory issueInfo = _createIssuanceInfo(_ckToken, _reserveAsset, _reserveAssetQuantity);
@@ -231,7 +231,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         ICKToken _ckToken,
         uint256 _minCKTokenReceiveQuantity,
         address _to
-    ) 
+    )
         external
         payable
         nonReentrant
@@ -240,7 +240,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         weth.deposit{ value: msg.value }();
 
         _validateCommon(_ckToken, address(weth), msg.value);
-        
+
         _callPreIssueHooks(_ckToken, address(weth), msg.value, msg.sender, _to);
 
         ActionInfo memory issueInfo = _createIssuanceInfo(_ckToken, address(weth), msg.value);
@@ -268,7 +268,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 _ckTokenQuantity,
         uint256 _minReserveReceiveQuantity,
         address _to
-    ) 
+    )
         external
         nonReentrant
         onlyValidAndInitializedCK(_ckToken)
@@ -279,7 +279,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
 
         ActionInfo memory redeemInfo = _createRedemptionInfo(_ckToken, _reserveAsset, _ckTokenQuantity);
 
-        _validateRedemptionInfo(_ckToken, _minReserveReceiveQuantity, _ckTokenQuantity, redeemInfo);
+        _validateRedemptionInfo(_ckToken, _minReserveReceiveQuantity, redeemInfo);
 
         _ckToken.burn(msg.sender, _ckTokenQuantity);
 
@@ -309,7 +309,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 _ckTokenQuantity,
         uint256 _minReserveReceiveQuantity,
         address payable _to
-    ) 
+    )
         external
         nonReentrant
         onlyValidAndInitializedCK(_ckToken)
@@ -320,7 +320,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
 
         ActionInfo memory redeemInfo = _createRedemptionInfo(_ckToken, address(weth), _ckTokenQuantity);
 
-        _validateRedemptionInfo(_ckToken, _minReserveReceiveQuantity, _ckTokenQuantity, redeemInfo);
+        _validateRedemptionInfo(_ckToken, _minReserveReceiveQuantity, redeemInfo);
 
         _ckToken.burn(msg.sender, _ckTokenQuantity);
 
@@ -348,7 +348,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
      */
     function addReserveAsset(ICKToken _ckToken, address _reserveAsset) external onlyManagerAndValidCK(_ckToken) {
         require(!isReserveAsset[_ckToken][_reserveAsset], "Reserve asset already exists");
-        
+
         navIssuanceSettings[_ckToken].reserveAssets.push(_reserveAsset);
         isReserveAsset[_ckToken][_reserveAsset] = true;
 
@@ -378,7 +378,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
      */
     function editPremium(ICKToken _ckToken, uint256 _premiumPercentage) external onlyManagerAndValidCK(_ckToken) {
         require(_premiumPercentage <= navIssuanceSettings[_ckToken].maxPremiumPercentage, "Premium must be less than maximum allowed");
-        
+
         navIssuanceSettings[_ckToken].premiumPercentage = _premiumPercentage;
 
         emit PremiumEdited(_ckToken, _premiumPercentage);
@@ -414,7 +414,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
      */
     function editFeeRecipient(ICKToken _ckToken, address _managerFeeRecipient) external onlyManagerAndValidCK(_ckToken) {
         require(_managerFeeRecipient != address(0), "Fee recipient must not be 0 address");
-        
+
         navIssuanceSettings[_ckToken].feeRecipient = _managerFeeRecipient;
 
         emit FeeRecipientEdited(_ckToken, _managerFeeRecipient);
@@ -661,7 +661,6 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
     function _validateRedemptionInfo(
         ICKToken _ckToken,
         uint256 _minReserveReceiveQuantity,
-        uint256 _ckTokenQuantity,
         ActionInfo memory _redeemInfo
     )
         internal
@@ -782,7 +781,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         address _reserveAsset,
         address _to,
         ActionInfo memory _issueInfo
-    ) 
+    )
         internal
     {
         _ckToken.editPositionMultiplier(_issueInfo.newPositionMultiplier);
@@ -800,7 +799,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
             _issueInfo.ckTokenQuantity,
             _issueInfo.managerFee,
             _issueInfo.protocolFees
-        );        
+        );
     }
 
     function _handleRedeemStateUpdates(
@@ -808,7 +807,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         address _reserveAsset,
         address _to,
         ActionInfo memory _redeemInfo
-    ) 
+    )
         internal
     {
         _ckToken.editPositionMultiplier(_redeemInfo.newPositionMultiplier);
@@ -824,7 +823,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
             _redeemInfo.ckTokenQuantity,
             _redeemInfo.managerFee,
             _redeemInfo.protocolFees
-        );      
+        );
     }
 
     function _handleRedemptionFees(ICKToken _ckToken, address _reserveAsset, ActionInfo memory _redeemInfo) internal {
@@ -932,7 +931,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 protocolDirectFeePercent = controller.getModuleFee(address(this), _protocolDirectFeeIndex);
         uint256 protocolManagerShareFeePercent = controller.getModuleFee(address(this), _protocolManagerFeeIndex);
         uint256 managerFeePercent = navIssuanceSettings[_ckToken].managerFees[_managerFeeIndex];
-        
+
         // Calculate revenue share split percentage
         uint256 protocolRevenueSharePercentage = protocolManagerShareFeePercent.preciseMul(managerFeePercent);
         uint256 managerRevenueSharePercentage = managerFeePercent.sub(protocolRevenueSharePercentage);
@@ -997,7 +996,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
      * The new position multiplier is calculated as follows:
      * inflationPercentage = (newSupply - oldSupply) / newSupply
      * newMultiplier = (1 - inflationPercentage) * positionMultiplier
-     */    
+     */
     function _getIssuePositionMultiplier(
         ICKToken _ckToken,
         ActionInfo memory _issueInfo
@@ -1017,11 +1016,11 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
 
     /**
      * Calculate deflation and new position multiplier. Note: Round deflation down in order to round position multiplier down
-     * 
+     *
      * The new position multiplier is calculated as follows:
      * deflationPercentage = (oldSupply - newSupply) / newSupply
      * newMultiplier = (1 + deflationPercentage) * positionMultiplier
-     */ 
+     */
     function _getRedeemPositionMultiplier(
         ICKToken _ckToken,
         uint256 _ckTokenQuantity,
@@ -1043,7 +1042,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
      * The new position reserve asset unit is calculated as follows:
      * totalReserve = (oldUnit * oldCKTokenSupply) + reserveQuantity
      * newUnit = totalReserve / newCKTokenSupply
-     */ 
+     */
     function _getIssuePositionUnit(
         ICKToken _ckToken,
         address _reserveAsset,
@@ -1065,7 +1064,7 @@ contract CustomOracleNavIssuanceModule is ModuleBase, ReentrancyGuard {
      * The new position reserve asset unit is calculated as follows:
      * totalReserve = (oldUnit * oldCKTokenSupply) - reserveQuantityToSendOut
      * newUnit = totalReserve / newCKTokenSupply
-     */ 
+     */
     function _getRedeemPositionUnit(
         ICKToken _ckToken,
         address _reserveAsset,

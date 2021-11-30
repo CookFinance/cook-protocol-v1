@@ -40,4 +40,12 @@ interface IWrapAdapter {
     ) external view returns (address _subject, uint256 _value, bytes memory _calldata);
 
     function getSpenderAddress(address _underlyingToken, address _wrappedToken) external view returns(address);
+
+    function getWrapSpenderAddress(address _underlyingToken, address _wrappedToken) external view returns(address);
+
+    function getUnwrapSpenderAddress(address _underlyingToken, address _wrappedToken) external view returns(address);
+
+    function getDepositUnderlyingTokenAmount(address _underlyingToken, address _wrappedToken, uint256 _wrappedTokenAmount) external view returns(uint256);
+
+    function getWithdrawUnderlyingTokenAmount(address _underlyingToken, address _wrappedToken, uint256 _wrappedTokenAmount) external view returns(uint256);
 }

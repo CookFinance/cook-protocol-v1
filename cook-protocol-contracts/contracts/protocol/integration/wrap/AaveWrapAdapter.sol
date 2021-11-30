@@ -124,6 +124,50 @@ contract AaveWrapAdapter {
     }
 
     /**
+     * Get total quantity of underlying token to get the specific amount of the wrapped token.
+     *
+     * @param _underlyingToken      Address of the component to be wrapped
+     * @param _wrappedToken         Address of the desired wrapped token
+     * @param _wrappedTokenAmount   Amount of wrapped token to get
+     *
+     * @return uint256              Total quantity of underlying units to deposit
+     */
+    function getDepositUnderlyingTokenAmount(
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _wrappedTokenAmount
+    )
+        external
+        view
+        onlyValidTokenPair(_underlyingToken, _wrappedToken)
+        returns (uint256)
+    {
+        return _wrappedTokenAmount;
+    }
+
+    /**
+     * Get total quantity of underlying token to be returned when withdraw the wrapped token.
+     *
+     * @param _underlyingToken      Address of the component to be wrapped
+     * @param _wrappedToken         Address of the desired wrapped token
+     * @param _wrappedTokenAmount   Amount of wrapped token to withdraw
+     *
+     * @return uint256              Total quantity of underlying units to be returned
+     */
+    function getWithdrawUnderlyingTokenAmount(
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _wrappedTokenAmount
+    )
+        external
+        view
+        onlyValidTokenPair(_underlyingToken, _wrappedToken)
+        returns (uint256)
+    {
+        return _wrappedTokenAmount;
+    }
+
+    /**
      * Returns the address to approve source tokens for wrapping. This is the Aave Lending Pool Core
      *
      * @return address        Address of the contract to approve tokens to

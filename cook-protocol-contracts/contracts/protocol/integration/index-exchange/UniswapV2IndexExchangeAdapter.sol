@@ -19,7 +19,9 @@
 pragma solidity 0.6.10;
 pragma experimental "ABIEncoderV2";
 
+import { BytesLib } from "external/contracts/uniswap/v3/lib/BytesLib.sol";
 import { IIndexExchangeAdapter } from "../../../interfaces/IIndexExchangeAdapter.sol";
+
 
 /**
  * @title UniswapV2IndexExchangeAdapter
@@ -27,8 +29,13 @@ import { IIndexExchangeAdapter } from "../../../interfaces/IIndexExchangeAdapter
  *
  * A Uniswap Router02 exchange adapter that returns calldata for trading with GeneralIndexModule, allows encoding a trade with a fixed input quantity or
  * a fixed output quantity.
+ *
+ *
+ *
  */
 contract UniswapV2IndexExchangeAdapter is IIndexExchangeAdapter {
+
+    using BytesLib for bytes;
 
     /* ============ State Variables ============ */
 
@@ -65,6 +72,8 @@ contract UniswapV2IndexExchangeAdapter is IIndexExchangeAdapter {
      * @param  _isSendTokenFixed         Boolean indicating if the send quantity is fixed, used to determine correct trade interface
      * @param  _sourceQuantity           Fixed/Max amount of source token to sell
      * @param  _destinationQuantity      Min/Fixed amount of destination token to buy
+     * @param  _data                     Encoded address intermediary token in the trade path.
+     *                                   If empty, path is the input and output tokens. Only allows one intermediary asset
      *
      * @return address                   Target contract address
      * @return uint256                   Call value
@@ -77,16 +86,26 @@ contract UniswapV2IndexExchangeAdapter is IIndexExchangeAdapter {
         bool _isSendTokenFixed,
         uint256 _sourceQuantity,
         uint256 _destinationQuantity,
-        bytes memory /*_data*/
+        bytes memory _data
     )
         external
         view
         override
         returns (address, uint256, bytes memory)
     {
-        address[] memory path = new address[](2);
-        path[0] = _sourceToken;
-        path[1] = _destinationToken;
+        address[] memory path;
+
+        if (_data.length == 0) {
+            path = new address[](2);
+            path[0] = _sourceToken;
+            path[1] = _destinationToken;
+        } else {
+            address intermediateToken = _data.toAddress(0);
+            path = new address[](3);
+            path[0] = _sourceToken;
+            path[1] = intermediateToken;
+            path[2] = _destinationToken;
+        }
 
         bytes memory callData = abi.encodeWithSignature(
             _isSendTokenFixed ? SWAP_EXACT_TOKENS_FOR_TOKENS : SWAP_TOKENS_FOR_EXACT_TOKENS,

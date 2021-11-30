@@ -121,7 +121,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 premiumPercentage;                     // Premium percentage (0.01% = 1e14, 1% = 1e16). This premium is a buffer around oracle
                                                        // prices paid by user to the CKToken, which prevents arbitrage and oracle front running
         uint256 maxPremiumPercentage;                  // Maximum premium percentage manager is allowed to set (configured by manager)
-        uint256 minCKTokenSupply;                     // Minimum CKToken supply required for issuance and redemption 
+        uint256 minCKTokenSupply;                      // Minimum CKToken supply required for issuance and redemption
                                                        // to prevent dramatic inflationary changes to the CKToken's position multiplier
     }
 
@@ -132,10 +132,10 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 managerFee;                            // Total manager fee paid in reserve asset
         uint256 netFlowQuantity;                       // When issuing, quantity of reserve asset sent to CKToken
                                                        // When redeeming, quantity of reserve asset sent to redeemer
-        uint256 ckTokenQuantity;                      // When issuing, quantity of CKTokens minted to mintee
+        uint256 ckTokenQuantity;                       // When issuing, quantity of CKTokens minted to mintee
                                                        // When redeeming, quantity of CKToken redeemed
-        uint256 previousCKTokenSupply;                // CKToken supply prior to issue/redeem action
-        uint256 newCKTokenSupply;                     // CKToken supply after issue/redeem action
+        uint256 previousCKTokenSupply;                 // CKToken supply prior to issue/redeem action
+        uint256 newCKTokenSupply;                      // CKToken supply after issue/redeem action
         int256 newPositionMultiplier;                  // CKToken position multiplier after issue/redeem
         uint256 newReservePositionUnit;                // CKToken reserve asset position unit after issue/redeem
     }
@@ -147,7 +147,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
 
     // Mapping of CKToken to NAV issuance settings struct
     mapping(ICKToken => NAVIssuanceSettings) public navIssuanceSettings;
-    
+
     // Mapping to efficiently check a CKToken's reserve asset validity
     // CKToken => reserveAsset => isReserveAsset
     mapping(ICKToken => mapping(address => bool)) public isReserveAsset;
@@ -183,7 +183,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
     }
 
     /* ============ External Functions ============ */
-    
+
     /**
      * Deposits the allowed reserve asset into the CKToken and mints the appropriate % of Net Asset Value of the CKToken
      * to the specified _to address.
@@ -200,13 +200,13 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 _reserveAssetQuantity,
         uint256 _minCKTokenReceiveQuantity,
         address _to
-    ) 
+    )
         external
         nonReentrant
         onlyValidAndInitializedCK(_ckToken)
     {
         _validateCommon(_ckToken, _reserveAsset, _reserveAssetQuantity);
-        
+
         _callPreIssueHooks(_ckToken, _reserveAsset, _reserveAssetQuantity, msg.sender, _to);
 
         ActionInfo memory issueInfo = _createIssuanceInfo(_ckToken, _reserveAsset, _reserveAssetQuantity);
@@ -230,7 +230,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         ICKToken _ckToken,
         uint256 _minCKTokenReceiveQuantity,
         address _to
-    ) 
+    )
         external
         payable
         nonReentrant
@@ -239,7 +239,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         weth.deposit{ value: msg.value }();
 
         _validateCommon(_ckToken, address(weth), msg.value);
-        
+
         _callPreIssueHooks(_ckToken, address(weth), msg.value, msg.sender, _to);
 
         ActionInfo memory issueInfo = _createIssuanceInfo(_ckToken, address(weth), msg.value);
@@ -267,7 +267,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 _ckTokenQuantity,
         uint256 _minReserveReceiveQuantity,
         address _to
-    ) 
+    )
         external
         nonReentrant
         onlyValidAndInitializedCK(_ckToken)
@@ -278,7 +278,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
 
         ActionInfo memory redeemInfo = _createRedemptionInfo(_ckToken, _reserveAsset, _ckTokenQuantity);
 
-        _validateRedemptionInfo(_ckToken, _minReserveReceiveQuantity, _ckTokenQuantity, redeemInfo);
+        _validateRedemptionInfo(_ckToken, _minReserveReceiveQuantity, redeemInfo);
 
         _ckToken.burn(msg.sender, _ckTokenQuantity);
 
@@ -308,7 +308,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 _ckTokenQuantity,
         uint256 _minReserveReceiveQuantity,
         address payable _to
-    ) 
+    )
         external
         nonReentrant
         onlyValidAndInitializedCK(_ckToken)
@@ -319,7 +319,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
 
         ActionInfo memory redeemInfo = _createRedemptionInfo(_ckToken, address(weth), _ckTokenQuantity);
 
-        _validateRedemptionInfo(_ckToken, _minReserveReceiveQuantity, _ckTokenQuantity, redeemInfo);
+        _validateRedemptionInfo(_ckToken, _minReserveReceiveQuantity, redeemInfo);
 
         _ckToken.burn(msg.sender, _ckTokenQuantity);
 
@@ -331,7 +331,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         );
 
         weth.withdraw(redeemInfo.netFlowQuantity);
-        
+
         _to.transfer(redeemInfo.netFlowQuantity);
 
         _handleRedemptionFees(_ckToken, address(weth), redeemInfo);
@@ -347,7 +347,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
      */
     function addReserveAsset(ICKToken _ckToken, address _reserveAsset) external onlyManagerAndValidCK(_ckToken) {
         require(!isReserveAsset[_ckToken][_reserveAsset], "Reserve asset already exists");
-        
+
         navIssuanceSettings[_ckToken].reserveAssets.push(_reserveAsset);
         isReserveAsset[_ckToken][_reserveAsset] = true;
 
@@ -377,7 +377,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
      */
     function editPremium(ICKToken _ckToken, uint256 _premiumPercentage) external onlyManagerAndValidCK(_ckToken) {
         require(_premiumPercentage <= navIssuanceSettings[_ckToken].maxPremiumPercentage, "Premium must be less than maximum allowed");
-        
+
         navIssuanceSettings[_ckToken].premiumPercentage = _premiumPercentage;
 
         emit PremiumEdited(_ckToken, _premiumPercentage);
@@ -399,7 +399,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         onlyManagerAndValidCK(_ckToken)
     {
         require(_managerFeePercentage <= navIssuanceSettings[_ckToken].maxManagerFee, "Manager fee must be less than maximum allowed");
-        
+
         navIssuanceSettings[_ckToken].managerFees[_managerFeeIndex] = _managerFeePercentage;
 
         emit ManagerFeeEdited(_ckToken, _managerFeePercentage, _managerFeeIndex);
@@ -413,7 +413,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
      */
     function editFeeRecipient(ICKToken _ckToken, address _managerFeeRecipient) external onlyManagerAndValidCK(_ckToken) {
         require(_managerFeeRecipient != address(0), "Fee recipient must not be 0 address");
-        
+
         navIssuanceSettings[_ckToken].feeRecipient = _managerFeeRecipient;
 
         emit FeeRecipientEdited(_ckToken, _managerFeeRecipient);
@@ -464,7 +464,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         for (uint256 i = 0; i < navIssuanceSettings[ckToken].reserveAssets.length; i++) {
             delete isReserveAsset[ckToken][navIssuanceSettings[ckToken].reserveAssets[i]];
         }
-        
+
         delete navIssuanceSettings[ckToken];
     }
 
@@ -660,7 +660,6 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
     function _validateRedemptionInfo(
         ICKToken _ckToken,
         uint256 _minReserveReceiveQuantity,
-        uint256 _ckTokenQuantity,
         ActionInfo memory _redeemInfo
     )
         internal
@@ -781,7 +780,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         address _reserveAsset,
         address _to,
         ActionInfo memory _issueInfo
-    ) 
+    )
         internal
     {
         _ckToken.editPositionMultiplier(_issueInfo.newPositionMultiplier);
@@ -799,7 +798,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
             _issueInfo.ckTokenQuantity,
             _issueInfo.managerFee,
             _issueInfo.protocolFees
-        );        
+        );
     }
 
     function _handleRedeemStateUpdates(
@@ -807,7 +806,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         address _reserveAsset,
         address _to,
         ActionInfo memory _redeemInfo
-    ) 
+    )
         internal
     {
         _ckToken.editPositionMultiplier(_redeemInfo.newPositionMultiplier);
@@ -823,7 +822,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
             _redeemInfo.ckTokenQuantity,
             _redeemInfo.managerFee,
             _redeemInfo.protocolFees
-        );      
+        );
     }
 
     function _handleRedemptionFees(ICKToken _ckToken, address _reserveAsset, ActionInfo memory _redeemInfo) internal {
@@ -931,7 +930,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
         uint256 protocolDirectFeePercent = controller.getModuleFee(address(this), _protocolDirectFeeIndex);
         uint256 protocolManagerShareFeePercent = controller.getModuleFee(address(this), _protocolManagerFeeIndex);
         uint256 managerFeePercent = navIssuanceSettings[_ckToken].managerFees[_managerFeeIndex];
-        
+
         // Calculate revenue share split percentage
         uint256 protocolRevenueSharePercentage = protocolManagerShareFeePercent.preciseMul(managerFeePercent);
         uint256 managerRevenueSharePercentage = managerFeePercent.sub(protocolRevenueSharePercentage);
@@ -995,7 +994,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
      * The new position multiplier is calculated as follows:
      * inflationPercentage = (newSupply - oldSupply) / newSupply
      * newMultiplier = (1 - inflationPercentage) * positionMultiplier
-     */    
+     */
     function _getIssuePositionMultiplier(
         ICKToken _ckToken,
         ActionInfo memory _issueInfo
@@ -1015,11 +1014,11 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
 
     /**
      * Calculate deflation and new position multiplier. Note: Round deflation down in order to round position multiplier down
-     * 
+     *
      * The new position multiplier is calculated as follows:
      * deflationPercentage = (oldSupply - newSupply) / newSupply
      * newMultiplier = (1 + deflationPercentage) * positionMultiplier
-     */ 
+     */
     function _getRedeemPositionMultiplier(
         ICKToken _ckToken,
         uint256 _ckTokenQuantity,
@@ -1041,7 +1040,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
      * The new position reserve asset unit is calculated as follows:
      * totalReserve = (oldUnit * oldCKTokenSupply) + reserveQuantity
      * newUnit = totalReserve / newCKTokenSupply
-     */ 
+     */
     function _getIssuePositionUnit(
         ICKToken _ckToken,
         address _reserveAsset,
@@ -1063,7 +1062,7 @@ contract NavIssuanceModule is ModuleBase, ReentrancyGuard {
      * The new position reserve asset unit is calculated as follows:
      * totalReserve = (oldUnit * oldCKTokenSupply) - reserveQuantityToSendOut
      * newUnit = totalReserve / newCKTokenSupply
-     */ 
+     */
     function _getRedeemPositionUnit(
         ICKToken _ckToken,
         address _reserveAsset,

@@ -42,16 +42,15 @@ contract CustomCKValuerMock is ICKValuer {
      * Gets the valuation of a CKToken using data from the price oracle. Reverts
      * if no price exists for a component in the CKToken. Note: this works for external
      * positions and negative (debt) positions.
-     * 
+     *
      * Note: There is a risk that the valuation is off if airdrops aren't retrieved or
      * debt builds up via interest and its not reflected in the position
      *
-     * @param _ckToken        CKToken instance to get valuation
      * @param _quoteAsset      Address of token to quote valuation in
      *
      * @return                 CKToken valuation in terms of quote asset in precise units 1e18
      */
-    function calculateCKTokenValuation(ICKToken _ckToken, address _quoteAsset) external view override returns (uint256) {
+    function calculateCKTokenValuation(ICKToken /* _ckToken */, address _quoteAsset) external view override returns (uint256) {
         return valuation[_quoteAsset];
     }
 }

@@ -19,6 +19,7 @@
 pragma solidity 0.6.10;
 pragma experimental "ABIEncoderV2";
 
+import { SafeMath } from "@openzeppelin/contracts/math/SafeMath.sol";
 import { IYearnVault } from "../../../interfaces/external/IYearnVault.sol";
 
 /**
@@ -28,6 +29,8 @@ import { IYearnVault } from "../../../interfaces/external/IYearnVault.sol";
  * Wrap adapter for Yearn that returns data for wraps/unwraps of tokens
  */
 contract YearnWrapAdapter {
+    using SafeMath for uint256;
+    address public constant ETH_TOKEN_ADDRESS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
     /* ============ Modifiers ============ */
 
@@ -93,6 +96,70 @@ contract YearnWrapAdapter {
     {
         bytes memory callData = abi.encodeWithSignature("withdraw(uint256)", _wrappedTokenUnits);
         return (address(_wrappedToken), 0, callData);
+    }
+
+    /**
+     * Get total quantity of underlying token to get the specific amount of the wrapped token.
+     *
+     * @param _underlyingToken      Address of the component to be wrapped
+     * @param _wrappedToken         Address of the desired wrapped token
+     * @param _wrappedTokenAmount   Amount of wrapped token to get
+     *
+     * @return uint256              Total quantity of underlying units to deposit
+     */
+    function getDepositUnderlyingTokenAmount(
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _wrappedTokenAmount
+    )
+        external
+        view
+        _onlyValidTokenPair(_underlyingToken, _wrappedToken)
+        returns (uint256)
+    {
+        IYearnVault yvToken = IYearnVault(_wrappedToken);
+        return _wrappedTokenAmount.mul(yvToken.pricePerShare()).div(10**yvToken.decimals());
+    }
+
+    /**
+     * Get total quantity of underlying token to be returned when withdraw the wrapped token.
+     *
+     * @param _underlyingToken      Address of the component to be wrapped
+     * @param _wrappedToken         Address of the desired wrapped token
+     * @param _wrappedTokenAmount   Amount of wrapped token to withdraw
+     *
+     * @return uint256              Total quantity of underlying units to be returned
+     */
+    function getWithdrawUnderlyingTokenAmount(
+        address _underlyingToken,
+        address _wrappedToken,
+        uint256 _wrappedTokenAmount
+    )
+        external
+        view
+        _onlyValidTokenPair(_underlyingToken, _wrappedToken)
+        returns (uint256)
+    {
+        IYearnVault yvToken = IYearnVault(_wrappedToken);
+        return _wrappedTokenAmount.mul(yvToken.pricePerShare()).div(10**yvToken.decimals());
+    }
+
+    /**
+     * Returns the address to approve source tokens for wrapping.
+     *
+     * @return address        Address of the contract to approve tokens to
+     */
+    function getWrapSpenderAddress(address /* _underlyingToken */, address  _wrappedToken) external view returns(address) {
+        return address(_wrappedToken);
+    }
+
+    /**
+     * Returns the address to approve source tokens for wrapping.
+     *
+     * @return address        Address of the contract to approve tokens to
+     */
+    function getUnwrapSpenderAddress(address /* _underlyingToken */, address  _wrappedToken) external view returns(address) {
+        return address(_wrappedToken);
     }
 
     /**

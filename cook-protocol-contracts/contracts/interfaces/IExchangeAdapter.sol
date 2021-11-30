@@ -30,4 +30,7 @@ interface IExchangeAdapter {
         external
         view
         returns (address, uint256, bytes memory);
+    function getMinAmountsOut(uint256 amountIn, address[] memory path) external view returns (uint256[] memory amounts);
+    function getMaxAmountsIn(uint256 amountOut, address[] memory path) external view returns (uint256[] memory amounts);
+    function generateDataParam(address[] memory path, bool _isSendTokenFixed) external pure returns (bytes memory);
 }

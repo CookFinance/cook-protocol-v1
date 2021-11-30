@@ -57,16 +57,28 @@ contract ZeroExApiAdapter {
     // ETH pseudo-token address used by 0x API.
     address private constant ETH_ADDRESS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
+    // Byte size of Uniswap V3 encoded path addresses and pool fees
+    uint256 private constant UNISWAP_V3_PATH_ADDRESS_SIZE = 20;
+    uint256 private constant UNISWAP_V3_PATH_FEE_SIZE = 3;
+    // Minimum byte size of a single hop Uniswap V3 encoded path (token address + fee + token adress)
+    uint256 private constant UNISWAP_V3_SINGLE_HOP_PATH_SIZE = UNISWAP_V3_PATH_ADDRESS_SIZE + UNISWAP_V3_PATH_FEE_SIZE + UNISWAP_V3_PATH_ADDRESS_SIZE;
+    // Byte size of one hop in the Uniswap V3 encoded path (token address + fee)
+    uint256 private constant UNISWAP_V3_SINGLE_HOP_OFFSET_SIZE = UNISWAP_V3_PATH_ADDRESS_SIZE + UNISWAP_V3_PATH_FEE_SIZE;
+
     // Address of the deployed ZeroEx contract.
     address public immutable zeroExAddress;
+    // Address of the WETH9 contract.
+    address public immutable wethAddress;
 
     // Returns the address to approve source tokens to for trading. This is the TokenTaker address
     address public immutable getSpender;
 
+
     /* ============ constructor ============ */
 
-    constructor(address _zeroExAddress) public {
+    constructor(address _zeroExAddress, address _wethAddress) public {
         zeroExAddress = _zeroExAddress;
+        wethAddress = _wethAddress;
         getSpender = _zeroExAddress;
     }
 
@@ -127,6 +139,9 @@ contract ZeroExApiAdapter {
                 (inputToken, outputToken, , recipient, inputTokenAmount, minOutputTokenAmount) =
                     abi.decode(_data[4:], (address, address, address, address, uint256, uint256));
                 supportsRecipient = true;
+                if (recipient == address(0)) {
+                    recipient = _destinationAddress;
+                }
             } else if (selector == 0xd9627aa4) {
                 // sellToUniswap()
                 address[] memory path;
@@ -152,6 +167,41 @@ contract ZeroExApiAdapter {
                 inputToken = fillData.tokens[0];
                 outputToken = fillData.tokens[fillData.tokens.length - 1];
                 inputTokenAmount = fillData.sellAmount;
+            } else if (selector == 0x6af479b2) {
+                // sellTokenForTokenToUniswapV3()
+                bytes memory encodedPath;
+                (encodedPath, inputTokenAmount, minOutputTokenAmount, recipient) =
+                    abi.decode(_data[4:], (bytes, uint256, uint256, address));
+                supportsRecipient = true;
+                if (recipient == address(0)) {
+                    recipient = _destinationAddress;
+                }
+                (inputToken, outputToken) = _decodeTokensFromUniswapV3EncodedPath(encodedPath);
+            } else if (selector == 0x803ba26d) {
+                // sellTokenForEthToUniswapV3()
+                bytes memory encodedPath;
+                (encodedPath, inputTokenAmount, minOutputTokenAmount, recipient) =
+                    abi.decode(_data[4:], (bytes, uint256, uint256, address));
+                supportsRecipient = true;
+                if (recipient == address(0)) {
+                    recipient = _destinationAddress;
+                }
+                (inputToken, outputToken) = _decodeTokensFromUniswapV3EncodedPath(encodedPath);
+                require(outputToken == wethAddress, "Last token must be WETH");
+                outputToken = ETH_ADDRESS;
+            } else if (selector == 0x3598d8ab) {
+                // sellEthForTokenToUniswapV3()
+                inputTokenAmount = _sourceQuantity;
+                bytes memory encodedPath;
+                (encodedPath, minOutputTokenAmount, recipient) =
+                    abi.decode(_data[4:], (bytes,  uint256, address));
+                supportsRecipient = true;
+                if (recipient == address(0)) {
+                    recipient = _destinationAddress;
+                }
+                (inputToken, outputToken) = _decodeTokensFromUniswapV3EncodedPath(encodedPath);
+                require(inputToken == wethAddress, "First token must be WETH");
+                inputToken = ETH_ADDRESS;
             } else {
                 revert("Unsupported 0xAPI function selector");
             }
@@ -169,5 +219,29 @@ contract ZeroExApiAdapter {
             inputToken == ETH_ADDRESS ? inputTokenAmount : 0,
             _data
         );
+    }
+
+    // Decode input and output tokens from an arbitrary length encoded Uniswap V3 path
+    function _decodeTokensFromUniswapV3EncodedPath(bytes memory encodedPath)
+        private
+        pure
+        returns (
+            address inputToken,
+            address outputToken
+        )
+    {
+        require(encodedPath.length >= UNISWAP_V3_SINGLE_HOP_PATH_SIZE, "UniswapV3 token path too short");
+
+        // UniswapV3 paths are packed encoded as (address(token0), uint24(fee), address(token1), [...])
+        // We want the first and last token.
+        uint256 numHops = (encodedPath.length - UNISWAP_V3_PATH_ADDRESS_SIZE)/UNISWAP_V3_SINGLE_HOP_OFFSET_SIZE;
+        uint256 lastTokenOffset = numHops * UNISWAP_V3_SINGLE_HOP_OFFSET_SIZE;
+
+        assembly {
+            let p := add(encodedPath, 32)
+            inputToken := shr(96, mload(p))
+            p := add(p, lastTokenOffset)
+            outputToken := shr(96, mload(p))
+        }
     }
 }
