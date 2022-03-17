@@ -19,20 +19,20 @@
 pragma solidity 0.6.10;
 pragma experimental "ABIEncoderV2";
 
-import { SafeMath } from "@openzeppelin/contracts/math/SafeMath.sol";
 import { IYearnVault } from "../../../interfaces/external/IYearnVault.sol";
 import { ICurve } from "../../../interfaces/external/ICurve.sol";
 import { PreciseUnitMath } from "../../../lib/PreciseUnitMath.sol";
+import { SafeMath } from "@openzeppelin/contracts/math/SafeMath.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import { PreciseUnitMath } from "../../../lib/PreciseUnitMath.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * @title YearnWrapAdapter
- * @author Cook Finance, Ember Fund
+ * @title YearnVaultCurveZapperWrapAdapter
+ * @author Cook Finance
  *
- * Wrap adapter for Yearn that returns data for wraps/unwraps of tokens
+ * Wrap adapter for wrapping with ycrv zapper
  */
-contract YearnVaultCurveZapperWrapAdapter {
+contract YearnVaultCurveZapperWrapAdapter is Ownable {
     using SafeMath for uint256;
     using PreciseUnitMath for uint256;
     address public constant YVAULT_ZAPIN = 0x92Be6ADB6a12Da0CA607F9d87DB2F9978cD6ec3E;
@@ -43,15 +43,12 @@ contract YearnVaultCurveZapperWrapAdapter {
     address constant CURVE_ZAPIN = 0x5Ce9b49B7A1bE9f2c3DC2B2A5BaCEA56fa21FBeE;
     address constant CURVE_ZAPOUT = 0xE03A338d5c305613AfC3877389DD3B0617233387;
 
-    address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
-    address constant USDN = 0x674C6Ad92Fd080e4004b2312b45f796a192D27a0;
-
-    address constant yvcrvUSDN = 0x3B96d491f067912D18563d56858Ba7d6EC67a6fa;
-    address constant crvUSDN = 0x4f3E8F405CF5aFC05D68142F3783bDfE13811522;
-
     mapping(address => address) public ycrvToCrv;
 
     mapping(address => address) public ycrvToCrvPools;
+
+    /* ============== Events ============= */
+    event CrvTokenAndPoolMappingsUpdated(address indexed ycrvToken, address crvToken, address crvSwapPool);
 
     /* ============ Modifiers ============ */
 
@@ -65,7 +62,6 @@ contract YearnVaultCurveZapperWrapAdapter {
 
     /* ============ Constructor ============ */
 
-    //TODO  add update function for pool mapping
     constructor() public {
         ycrvToCrv[0x3B96d491f067912D18563d56858Ba7d6EC67a6fa] = 0x4f3E8F405CF5aFC05D68142F3783bDfE13811522; // yvCrvUSDN => crvUSDN
         ycrvToCrv[0x5fA5B62c8AF877CB37031e0a3B2f34A78e3C56A6] = 0xEd279fDD11cA84bEef15AF5D39BB4d4bEE23F0cA; // yvCrvLUSD => crvLUSD
@@ -227,5 +223,14 @@ contract YearnVaultCurveZapperWrapAdapter {
     function validTokenPair(address _underlyingToken, address _wrappedToken) internal view returns(bool) {
         address unwrappedToken = IYearnVault(_wrappedToken).token();
         return unwrappedToken == _underlyingToken;
+    }
+
+    /**
+     * Update ycrv token and pool mapping
+     */
+    function setYCrvTokenAndPoolMappings(address ycrvToken, address crvToken, address crvSwapPool) external onlyOwner {
+        ycrvToCrv[ycrvToken] = crvToken;
+        ycrvToCrvPools[ycrvToken] = crvSwapPool;
+        emit CrvTokenAndPoolMappingsUpdated(ycrvToken, crvToken, crvSwapPool);
     }
 }

@@ -300,12 +300,14 @@ contract IssuanceModule is Ownable, ModuleBase, ReentrancyGuard {
      * @param _ckTokenQuantity     Quantity of the CKToken to redeem
      * @param _redeemToken         Address of redeem token
      * @param _to                  Address to redeem CKToken to
+     * @param _minRedeemTokenToRec Minimum redeem to to receive
      */
     function redeemToSingleToken(
         ICKToken _ckToken,
         uint256 _ckTokenQuantity,
         address _redeemToken,
-        address _to
+        address _to,
+        uint256 _minRedeemTokenToRec
     )
         external
         nonReentrant
@@ -324,6 +326,8 @@ contract IssuanceModule is Ownable, ModuleBase, ReentrancyGuard {
             uint256 redeemTokenAcquired = _exchangeDefaultPositionsToRedeemToken(_ckToken, _redeemToken, components[i], componentQuantities[i]);
             totalRedeemTokenAcquired = totalRedeemTokenAcquired.add(redeemTokenAcquired);
         }
+
+        require(totalRedeemTokenAcquired >= _minRedeemTokenToRec, "_minRedeemTokenToRec not met");
 
         _ckToken.strictInvokeTransfer(
             _redeemToken,
@@ -499,7 +503,7 @@ contract IssuanceModule is Ownable, ModuleBase, ReentrancyGuard {
      * @param _to                   Address to mint CKToken to
      * @param _returnDust           If to return left components
      */
-    function _issueWithSingleToken2 (       
+    function _issueWithSingleToken2(   
         ICKToken _ckToken,
         address _issueToken,
         uint256 _issueTokenQuantity,
@@ -515,7 +519,7 @@ contract IssuanceModule is Ownable, ModuleBase, ReentrancyGuard {
         address[] memory components = _ckToken.getComponents();
         require(components.length == _weightings.length, "weightings mismatch");
         (uint256 maxCkTokenToIssue, uint256 returnedIssueToken) = _issueWithSpec(_ckToken, _issueToken, _issueTokenQuantity, components, _weightings, _returnDust);
-        require(maxCkTokenToIssue >= _minCkTokenRec, "_minCkTokenRec to met");
+        require(maxCkTokenToIssue >= _minCkTokenRec, "_minCkTokenRec not met");
 
         _ckToken.mint(_to, maxCkTokenToIssue);
 

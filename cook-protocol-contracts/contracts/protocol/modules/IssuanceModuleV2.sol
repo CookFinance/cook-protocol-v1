@@ -40,16 +40,15 @@ import { Position } from "../lib/Position.sol";
 import { PreciseUnitMath } from "../../lib/PreciseUnitMath.sol";
 import { IExchangeAdapter } from "../../interfaces/IExchangeAdapter.sol";
 import { ResourceIdentifier } from "../lib/ResourceIdentifier.sol";
-
-import { ICurve } from "../../interfaces/external/ICurve.sol";
+import { IYieldYakStrategyV2 } from "../../interfaces/external/IYieldYakStrategyV2.sol";
 
 import "hardhat/console.sol";
 
 /**
- * @title IssuanceModuleV2
+ * @title IssuanceModule
  * @author Cook Finance
  *
- * The IssuanceModuleV2 is a module that enables users to issue and redeem CKTokens that contain default and 
+ * The IssuanceModule is a module that enables users to issue and redeem CKTokens that contain default and 
  * non-debt external Positions. Managers are able to set an external contract hook that is called before an
  * issuance is called.
  */
@@ -76,14 +75,15 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
         address sendToken;                              // Address of token being sold
         address receiveToken;                           // Address of token being bought
         uint256 totalSendQuantity;                      // Total quantity of sold token
-        uint256 totalMinReceiveQuantity;                // Total quantity of token to receive back        
+        uint256 totalReceiveQuantity;                   // Total quantity of token to receive back
         uint256 preTradeSendTokenBalance;               // Total initial balance of token being sold
         uint256 preTradeReceiveTokenBalance;            // Total initial balance of token being bought
+        bytes data;                                     // Arbitrary data
     }
 
     /* ============ Events ============ */
 
-    event CKTokenIssued(address indexed _ckToken, address _issuer, address _to, address _hookContract, uint256 _quantity);
+    event CKTokenIssued(address indexed _ckToken, address _issuer, address _to, address _hookContract, uint256 _ckMintQuantity, uint256 _issuedTokenReturned);
     event CKTokenRedeemed(address indexed _ckToken, address _redeemer, address _to, uint256 _quantity);
     event AssetExchangeExecutionParamUpdated(address indexed _component, string _newExchangeName);
     event AssetWrapExecutionParamUpdated(address indexed _component, string _newWrapAdapterName, address _newUnderlyingToken);
@@ -139,16 +139,16 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
      *
      * @param _ckToken              Instance of the CKToken contract
      * @param _minCkTokenRec        The minimum amount of CKToken to receive
+     * @param _midTokens            The mid tokens in swap route
      * @param _weightings           Eth distribution for each component
-     * @param _tradeDatas                Arbitrary bytes to be used to construct trade call data per component
      * @param _to                   Address to mint CKToken to
      * @param _returnDust           If to return left components
      */
-    function issueWithEther2(
+    function issueWithEther2 (
         ICKToken _ckToken,
         uint256 _minCkTokenRec,
+        address[] memory _midTokens,
         uint256[] memory _weightings,
-        bytes[] memory _tradeDatas,
         address _to,
         bool _returnDust
     )         
@@ -166,7 +166,7 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
             address(_ckToken),
             msg.value
         );
-        uint256 issueTokenRemain = _issueWithSingleToken2(_ckToken, address(weth), msg.value, _minCkTokenRec, _weightings, _tradeDatas, _to, _returnDust);
+        uint256 issueTokenRemain = _issueWithSingleToken2(_ckToken, address(weth), msg.value, _minCkTokenRec, _midTokens, _weightings, _to, _returnDust);
         // transfer the remaining weth to issuer
         _ckToken.strictInvokeTransfer(
             address(weth),
@@ -179,9 +179,11 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
      * Issue ckToken with a specified amount of a single asset with specification
      *
      * @param _ckToken              Instance of the CKToken contract
+     * @param _issueToken           token used to issue with
+     * @param _issueTokenQuantity   amount of issue tokens
      * @param _minCkTokenRec        The minimum amount of CKToken to receive
-     * @param _weightings           issue token distribution per component
-     * @param _tradeDatas           Arbitrary bytes to be used to construct trade call data per component
+     * @param _midTokens            The mid tokens in swap route
+     * @param _weightings           Eth distribution for each component
      * @param _to                   Address to mint CKToken to
      * @param _returnDust           If to return left components
      */
@@ -190,8 +192,8 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
         address _issueToken,
         uint256 _issueTokenQuantity,
         uint256 _minCkTokenRec,
+        address[] memory _midTokens,
         uint256[] memory _weightings,  // percentage in 18 decimals and order should follow ckComponents get from a ck token
-        bytes[] memory _tradeDatas, 
         address _to,
         bool _returnDust
     )   
@@ -208,7 +210,7 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
             _issueTokenQuantity
         );        
         
-        uint256 issueTokenRemain = _issueWithSingleToken2(_ckToken, _issueToken, _issueTokenQuantity, _minCkTokenRec, _weightings, _tradeDatas, _to, _returnDust);
+        uint256 issueTokenRemain = _issueWithSingleToken2(_ckToken, _issueToken, _issueTokenQuantity, _minCkTokenRec, _midTokens, _weightings, _to, _returnDust);
         // transfer the remaining weth to issuer
         _ckToken.strictInvokeTransfer(
             address(_issueToken),
@@ -225,15 +227,17 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
      * @param _ckToken             Instance of the CKToken contract
      * @param _ckTokenQuantity     Quantity of the CKToken to redeem
      * @param _redeemToken         Address of redeem token
+     * @param _midTokens           The mid tokens in swap route
      * @param _to                  Address to redeem CKToken to
-     * @param _tradeDatas          Arbitrary bytes to be used to construct trade call data per component
+     * @param _minRedeemTokenToRec Minimum redeem to to receive
      */
     function redeemToSingleToken(
         ICKToken _ckToken,
         uint256 _ckTokenQuantity,
         address _redeemToken,
+        address[] memory _midTokens,
         address _to,
-        bytes[] memory _tradeDatas
+        uint256 _minRedeemTokenToRec
     )
         external
         nonReentrant
@@ -247,11 +251,14 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
             uint256[] memory componentQuantities
         ) = getRequiredComponentIssuanceUnits(_ckToken, _ckTokenQuantity, false);
         uint256 totalRedeemTokenAcquired = 0;
+        require(_midTokens.length == components.length, "_midTokens length mismatch");
         for (uint256 i = 0; i < components.length; i++) {
             _executeExternalPositionHooks(_ckToken, _ckTokenQuantity, IERC20(components[i]), false);
-            uint256 redeemTokenAcquired = _exchangeDefaultPositionsToRedeemToken(_ckToken, _redeemToken, components[i], componentQuantities[i], _tradeDatas[i]);
+            uint256 redeemTokenAcquired = _exchangeDefaultPositionsToRedeemToken(_ckToken, _redeemToken, _midTokens[i], components[i], componentQuantities[i]);
             totalRedeemTokenAcquired = totalRedeemTokenAcquired.add(redeemTokenAcquired);
         }
+
+        require(totalRedeemTokenAcquired >= _minRedeemTokenToRec, "_minRedeemTokenToRec not met");
 
         _ckToken.strictInvokeTransfer(
             _redeemToken,
@@ -283,12 +290,10 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
     }
 
     /**
-     * Reverts as this module should not be removable after added. Users should always
-     * have a way to redeem their CKs
+     * Removes this module from the CKToken, via call by the CKToken. Left with empty logic
+     * here because there are no check needed to verify removal.
      */
-    function removeModule() external override {
-        revert("The IssuanceModuleV2 module cannot be removed");
-    }
+    function removeModule() external override {}
 
     /**
      * OWNER ONLY: Set exchange for passed components of the CKToken. Can be called at anytime.
@@ -388,19 +393,21 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
      * This is a internal implementation for issue ckToken with a specified amount of a single asset with specification. 
      *
      * @param _ckToken              Instance of the CKToken contract
+     * @param _issueToken           token used to issue with
+     * @param _issueTokenQuantity   amount of issue tokens
      * @param _minCkTokenRec        The minimum amount of CKToken to receive
+     * @param _midTokens            The mid tokens in swap route
      * @param _weightings           Eth distribution for each component
-     * @param _tradeDatas                Arbitrary bytes to be used to construct trade call data per component
      * @param _to                   Address to mint CKToken to
      * @param _returnDust           If to return left components
      */
-    function _issueWithSingleToken2 (       
+    function _issueWithSingleToken2(   
         ICKToken _ckToken,
         address _issueToken,
         uint256 _issueTokenQuantity,
         uint256 _minCkTokenRec,
+        address[] memory _midTokens,
         uint256[] memory _weightings,
-        bytes[] memory _tradeDatas,
         address _to,
         bool _returnDust
     ) 
@@ -408,64 +415,51 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
         returns(uint256)
     {
         address hookContract = _callPreIssueHooks(_ckToken, _minCkTokenRec, msg.sender, _to);
-        console.log("_issueTokenQuantity: ", _issueTokenQuantity);
         address[] memory components = _ckToken.getComponents();
         require(components.length == _weightings.length, "weightings mismatch");
-        (uint256 maxCkTokenToIssue, uint256 returnedIssueToken) = _issueWithSpec(_ckToken, _issueToken, _issueTokenQuantity, components, _weightings, _tradeDatas, _returnDust);
-        // require(maxCkTokenToIssue >= _minCkTokenRec, "not above min isssue");
-        console.log("=======================");
-        console.log("_minCkTokenRec: ", _minCkTokenRec);
-        console.log("maxCkTokenToIssue: ", maxCkTokenToIssue);
-        console.log("dust return:", returnedIssueToken);
-        console.log("=======================");
+        require(components.length == _midTokens.length, "midTokens mismatch");
+        (uint256 maxCkTokenToIssue, uint256 returnedIssueToken) = _issueWithSpec(_ckToken, _issueToken, _issueTokenQuantity, _midTokens, _weightings, _returnDust);
+        require(maxCkTokenToIssue >= _minCkTokenRec, "_minCkTokenRec not met");
 
         _ckToken.mint(_to, maxCkTokenToIssue);
 
-        emit CKTokenIssued(address(_ckToken), msg.sender, _to, hookContract, maxCkTokenToIssue);        
+        emit CKTokenIssued(address(_ckToken), msg.sender, _to, hookContract, maxCkTokenToIssue, returnedIssueToken);        
         
         return returnedIssueToken;
     }
 
-    function _issueWithSpec(ICKToken _ckToken, address _issueToken, uint256 _issueTokenQuantity, address[] memory components, uint256[] memory _weightings, bytes[] memory _tradeDatas, bool _returnDust) 
+    function _issueWithSpec(ICKToken _ckToken, address _issueToken, uint256 _issueTokenQuantity, address[] memory _midTokens, uint256[] memory _weightings, bool _returnDust) 
         internal 
         returns(uint256, uint256)
     {
         uint256 maxCkTokenToIssue = PreciseUnitMath.MAX_UINT_256;
+        address[] memory components = _ckToken.getComponents();
         uint256[] memory componentTokenReceiveds = new uint256[](components.length);
 
         for (uint256 i = 0; i < components.length; i++) {
-            console.log("******************");
-            console.log("component: ", components[i]);
-            console.log("_weightings[i]: ", _weightings[i]);
             uint256 _issueTokenAmountToUse = _issueTokenQuantity.preciseMul(_weightings[i]).sub(1); // avoid underflow
             uint256 componentRealUnitRequired = (_ckToken.getDefaultPositionRealUnit(components[i])).toUint256();
-            uint256 componentReceived = _tradeAndWrapComponents2(_ckToken, _issueToken, _issueTokenAmountToUse, components[i], _tradeDatas[i]);
+            uint256 componentReceived = _tradeAndWrapComponents(_ckToken, _issueToken, _issueTokenAmountToUse, _midTokens[i] ,components[i]);
             componentTokenReceiveds[i] = componentReceived;
             // guarantee issue ck token amount.
             uint256 maxIssue = componentReceived.preciseDiv(componentRealUnitRequired);
-            console.log("component: ", components[i]);
-            console.log("maxIssue: ", maxIssue);
-
             if (maxIssue <= maxCkTokenToIssue) {
                 maxCkTokenToIssue = maxIssue;
             }
         }   
 
-        uint256 issueTokenToReturn = 0;
-        if (_returnDust) {
-            issueTokenToReturn = _dustToReturn(_ckToken, _issueToken, componentTokenReceiveds, maxCkTokenToIssue, _tradeDatas);
-        } 
+        uint256 issueTokenToReturn = _dustToReturn(_ckToken, _issueToken, _midTokens, componentTokenReceiveds, maxCkTokenToIssue, _returnDust);
  
         return (maxCkTokenToIssue, issueTokenToReturn);
     }
 
-    function _tradeAndWrapComponents2(ICKToken _ckToken, address _issueToken, uint256 _issueTokenAmountToUse, address _component, bytes memory _tradeData) internal returns(uint256) {
+    function _tradeAndWrapComponents(ICKToken _ckToken, address _issueToken, uint256 _issueTokenAmountToUse, address _midToken, address _component) internal returns(uint256) {
         uint256 componentTokenReceived;
         if (_issueToken == _component) {
             componentTokenReceived = _issueTokenAmountToUse;     
         } else if (wrapInfo[IERC20(_component)].underlyingToken == address(0)) {
             // For underlying tokens, exchange directly
-            (, componentTokenReceived) = _trade(_ckToken, _issueToken, _component, _issueTokenAmountToUse, 0, _tradeData, exchangeInfo[IERC20(_component)]);
+            (, componentTokenReceived) = _trade(_ckToken, _issueToken, _midToken, _component, _issueTokenAmountToUse, true);
         } else {
             // For wrapped tokens, exchange to underlying tokens first and then wrap it
             WrapExecutionParams memory wrapExecutionParams = wrapInfo[IERC20(_component)];
@@ -473,36 +467,36 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
             uint256 underlyingReceived = 0;
             if (wrapExecutionParams.underlyingToken == wrapAdapter.ETH_TOKEN_ADDRESS()) {
                 if (_issueToken != address(weth)) {
-                    (, underlyingReceived) = _trade(_ckToken, _issueToken, address(weth), _issueTokenAmountToUse, 0, _tradeData, exchangeInfo[IERC20(address(weth))]);
+                    (, underlyingReceived) = _trade(_ckToken, _issueToken, _midToken, address(weth), _issueTokenAmountToUse, true);
                 } else {
                     underlyingReceived = _issueTokenAmountToUse;
                 }
                 componentTokenReceived = _wrap(_ckToken, wrapExecutionParams.underlyingToken, _component, underlyingReceived, wrapExecutionParams.wrapAdapterName, true);
             } else {
-                (, underlyingReceived) = _trade(_ckToken, _issueToken, wrapExecutionParams.underlyingToken, _issueTokenAmountToUse, 0, _tradeData, exchangeInfo[IERC20(wrapExecutionParams.underlyingToken)]);
+                (, underlyingReceived) = _trade(_ckToken, _issueToken, _midToken, wrapExecutionParams.underlyingToken , _issueTokenAmountToUse, true);
                 componentTokenReceived = _wrap(_ckToken, wrapExecutionParams.underlyingToken, _component, underlyingReceived, wrapExecutionParams.wrapAdapterName, false);
-            }                    
+            }
         }
 
-        console.log("_issueTokenAmountToUse: ", _issueTokenAmountToUse);
-        console.log("componentTokenReceived: ", componentTokenReceived);
         return componentTokenReceived;
     }
     
     /**
      * Swap remaining component back to issue token.
      */
-    function _dustToReturn(ICKToken _ckToken, address _issueToken, uint256[] memory componentTokenReceiveds, uint256 maxCkTokenToIssue, bytes[] memory _tradeDatas) internal returns(uint256) {
+    function _dustToReturn(ICKToken _ckToken, address _issueToken, address[] memory _midTokens, uint256[] memory componentTokenReceiveds, uint256 maxCkTokenToIssue, bool _returnDust) internal returns(uint256) {
+        if (!_returnDust) {
+            return 0;
+        }
         uint256 issueTokenToReturn = 0;
         address[] memory components = _ckToken.getComponents();
-        console.log(components.length);
-        console.log(_tradeDatas.length);
+
         for(uint256 i = 0; i < components.length; i++) {
             uint256 requiredComponentUnit = ((_ckToken.getDefaultPositionRealUnit(components[i])).toUint256()).preciseMul(maxCkTokenToIssue);
             uint256 toReturn = componentTokenReceiveds[i].sub(requiredComponentUnit);
-            uint256 diffPercentage = toReturn.preciseDiv(requiredComponentUnit);
-            if (diffPercentage > (PreciseUnitMath.preciseUnit().div(1000))) {
-                issueTokenToReturn = issueTokenToReturn.add(_exchangeDefaultPositionsToRedeemToken(_ckToken, _issueToken, components[i], toReturn, _tradeDatas[components.length + i]));
+            uint256 diffPercentage = toReturn.preciseDiv(requiredComponentUnit); // percentage in 18 decimals
+            if (diffPercentage > (PreciseUnitMath.preciseUnit().div(10000))) { // 0.01%
+                issueTokenToReturn = issueTokenToReturn.add(_exchangeDefaultPositionsToRedeemToken(_ckToken, _issueToken, _midTokens[i], components[i], toReturn));
             }
         }     
 
@@ -585,8 +579,7 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
         }
     }
 
-    function _exchangeDefaultPositionsToRedeemToken(ICKToken _ckToken, address _redeemToken, address _component, uint256 _componentQuantity, bytes memory _tradeData
-    ) internal returns(uint256) {
+    function _exchangeDefaultPositionsToRedeemToken(ICKToken _ckToken, address _redeemToken, address _midToken, address _component, uint256 _componentQuantity) internal returns(uint256) {
         uint256 redeemTokenAcquired;
         if (_redeemToken == _component) {
             // continue if redeem token is component token
@@ -594,7 +587,7 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
         } else if (wrapInfo[IERC20(_component)].underlyingToken == address(0)) {
             // For underlying tokens, exchange directly
             
-            (, redeemTokenAcquired) = _trade(_ckToken, _component, _redeemToken, _componentQuantity, 0, _tradeData, exchangeInfo[IERC20(_component)]);
+            (, redeemTokenAcquired) = _trade(_ckToken, _component, _midToken, _redeemToken, _componentQuantity, true);
         } else {
             // For wrapped tokens, unwrap it and exchange underlying tokens to redeem tokens
             WrapExecutionParams memory wrapExecutionParams = wrapInfo[IERC20(_component)];
@@ -604,9 +597,9 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
             _unwrap(_ckToken, wrapExecutionParams.underlyingToken, _component, _componentQuantity, wrapExecutionParams.wrapAdapterName, wrapExecutionParams.underlyingToken == wrapAdapter.ETH_TOKEN_ADDRESS());
 
             if (wrapExecutionParams.underlyingToken == wrapAdapter.ETH_TOKEN_ADDRESS()) {
-                (, redeemTokenAcquired) = _trade(_ckToken, address(weth), _redeemToken, underlyingReceived, 0, _tradeData, exchangeInfo[IERC20(address(weth))]);                
+                (, redeemTokenAcquired) = _trade(_ckToken, address(weth), _midToken, _redeemToken, underlyingReceived, true);                
             } else {
-                (, redeemTokenAcquired) = _trade(_ckToken, wrapExecutionParams.underlyingToken, _redeemToken, underlyingReceived, 0, _tradeData, exchangeInfo[IERC20(wrapExecutionParams.underlyingToken)]);                
+                (, redeemTokenAcquired) = _trade(_ckToken, wrapExecutionParams.underlyingToken, _midToken, _redeemToken, underlyingReceived, true);                
             }    
         }
         return redeemTokenAcquired;
@@ -634,7 +627,7 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
         .sub(_tradeInfo.preTradeReceiveTokenBalance);
 
         require(
-            exchangedQuantity >= _tradeInfo.totalMinReceiveQuantity, "Slippage too big"
+            exchangedQuantity >= _tradeInfo.totalReceiveQuantity, "Slippage too big"
         );
         return exchangedQuantity;
     }
@@ -647,8 +640,6 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
     function _validatePreTradeData(TradeInfo memory _tradeInfo) internal view {
         require(_tradeInfo.totalSendQuantity > 0, "Token to sell must be nonzero");
         uint256 sendTokenBalance = IERC20(_tradeInfo.sendToken).balanceOf(address(_tradeInfo.ckToken));
-        console.log("cktoken balance: ", sendTokenBalance);
-        console.log("to send out: ", _tradeInfo.totalSendQuantity);
         require(
             sendTokenBalance >= _tradeInfo.totalSendQuantity,
             "total send quantity cant be greater than existing"
@@ -661,9 +652,10 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
      * @param _ckToken              Instance of the CKToken to trade
      * @param _exchangeAdapter      The exchange adapter in the integrations registry
      * @param _sendToken            Address of the token to be sent to the exchange
+     * @param _midToken             Address of the token in route
      * @param _receiveToken         Address of the token that will be received from the exchange
-     * @param _sendQuantity        Exact token quantity during trade
-     * @param _minReceiveQuantity   Min units of token in CKToken to be received from the exchange
+     * @param _exactQuantity        Exact token quantity during trade
+     * @param _isSendTokenFixed     Indicate if the send token is fixed
      *
      * return TradeInfo             Struct containing data for trade
      */
@@ -671,68 +663,91 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
         ICKToken _ckToken,
         IExchangeAdapter _exchangeAdapter,
         address _sendToken,
+        address _midToken,
         address _receiveToken,
-        uint256 _sendQuantity,
-        uint256 _minReceiveQuantity
+        uint256 _exactQuantity,
+        bool _isSendTokenFixed
     )
         internal
         view
         returns (TradeInfo memory)
     {
+        console.log("=================");
+        uint256 thresholdAmount;
+        address[] memory path;
+        if (_midToken == address(0) || _midToken == _sendToken || _midToken == _receiveToken) {
+            path = new address[](2);
+            path[0] = _sendToken;
+            path[1] = _receiveToken;
+            console.log(path[0]);
+            console.log(path[1]);            
+        } else {
+            path = new address[](3);
+            path[0] = _sendToken;
+            path[1] = _midToken;
+            path[2] = _receiveToken;
+            console.log(path[0]);
+            console.log(path[1]);
+            console.log(path[2]);
+        }
+
+
         TradeInfo memory tradeInfo;
-
         tradeInfo.ckToken = _ckToken;
-
         tradeInfo.exchangeAdapter = _exchangeAdapter;
-
         tradeInfo.sendToken = _sendToken;
         tradeInfo.receiveToken = _receiveToken;
-        tradeInfo.totalSendQuantity =  _sendQuantity;
-
-        tradeInfo.totalMinReceiveQuantity = _minReceiveQuantity;
-
+        tradeInfo.totalSendQuantity =  _exactQuantity;
+        tradeInfo.totalReceiveQuantity = 0;
         tradeInfo.preTradeSendTokenBalance = _snapshotTargetTokenBalance(_ckToken, _sendToken);
         tradeInfo.preTradeReceiveTokenBalance = _snapshotTargetTokenBalance(_ckToken, _receiveToken);
-        
+        tradeInfo.data = _isSendTokenFixed ? _exchangeAdapter.generateDataParam(path, true) : _exchangeAdapter.generateDataParam(path, false);
         return tradeInfo;
     }
 
     /**
      * Invoke approve for send token, get method data and invoke trade in the context of the CKToken.
      *
-     * @param _tradeInfo            Struct containing trade information used in internal functions
-     * @param _tradeData            Arbitrary bytes to be used to construct trade call data
+     * @param _ckToken              Instance of the CKToken to trade
+     * @param _exchangeAdapter      Exchange adapter in the integrations registry
+     * @param _sendToken            Address of the token to be sent to the exchange
+     * @param _receiveToken         Address of the token that will be received from the exchange
+     * @param _sendQuantity         Units of token in CKToken sent to the exchange
+     * @param _receiveQuantity      Units of token in CKToken received from the exchange
+     * @param _data                 Arbitrary bytes to be used to construct trade call data
      */
     function _executeTrade(
-        TradeInfo memory _tradeInfo,
-        bytes memory _tradeData
+        ICKToken _ckToken,
+        IExchangeAdapter _exchangeAdapter,
+        address _sendToken,
+        address _receiveToken,
+        uint256 _sendQuantity,
+        uint256 _receiveQuantity,
+        bytes memory _data
     )
         internal
     {
         // Get spender address from exchange adapter and invoke approve for exact amount on CKToken
-        _tradeInfo.ckToken.invokeApprove(
-            _tradeInfo.sendToken,
-            _tradeInfo.exchangeAdapter.getSpender(),
-            _tradeInfo.totalSendQuantity
+        _ckToken.invokeApprove(
+            _sendToken,
+            _exchangeAdapter.getSpender(),
+            _sendQuantity
         );
-        console.log("approved");
+
         (
             address targetExchange,
             uint256 callValue,
             bytes memory methodData
-        ) = _tradeInfo.exchangeAdapter.getTradeCalldata(
-            _tradeInfo.sendToken,
-            _tradeInfo.receiveToken,
-            address(_tradeInfo.ckToken),
-            _tradeInfo.totalSendQuantity,
-            _tradeInfo.totalMinReceiveQuantity,
-            _tradeData
+        ) = _exchangeAdapter.getTradeCalldata(
+            _sendToken,
+            _receiveToken,
+            address(_ckToken),
+            _sendQuantity,
+            _receiveQuantity,
+            _data
         );
 
-        console.log("targetExchange: ", targetExchange);
-        console.log("get trade call data");
-        _tradeInfo.ckToken.invoke(targetExchange, callValue, methodData);
-        console.log("invoked");
+        _ckToken.invoke(targetExchange, callValue, methodData);
     }
 
     /**
@@ -740,38 +755,36 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
      *
      * @param _ckToken              Instance of the CKToken to trade
      * @param _sendToken            Address of the token to be sent to the exchange
-     * @param _receiveToken         Address of the token that will be received from the exchange
-     * @param _sendQuantity         Quantity of send token to trade
-     * @param _minReceiveQuantity   Min units of token in CKToken to be received from the exchange
-     * @param _tradeData            Arbitrary bytes to be used to construct trade call data
-     * @param _dexName              Name of the exchange
+     * @param _midToken             _midToken
+     * @param _receiveToken         Address of the token that will be received from the exchange     
+     * @param _exactQuantity        Exact Quantity of token in CKToken to be sent or received from the exchange
+     * @param _isSendTokenFixed     Indicate if the send token is fixed
      */
     function _trade(
         ICKToken _ckToken,
         address _sendToken,
+        address _midToken,
         address _receiveToken,
-        uint256 _sendQuantity,
-        uint256 _minReceiveQuantity,
-        bytes memory _tradeData,
-        string memory _dexName
+        uint256 _exactQuantity,
+        bool _isSendTokenFixed
     )
         internal
         returns (uint256, uint256)
     {
         if (address(_sendToken) == address(_receiveToken)) {
-            return (_sendQuantity, _sendQuantity);
+            return (_exactQuantity, _exactQuantity);
         }
-        console.log("_dexName: ", _dexName);
         TradeInfo memory tradeInfo = _createTradeInfo(
             _ckToken,
-            IExchangeAdapter(getAndValidateAdapter(_dexName)),
+            IExchangeAdapter(getAndValidateAdapter(exchangeInfo[IERC20(_receiveToken)])),
             _sendToken,
+            _midToken,
             _receiveToken,
-            _sendQuantity,
-            _minReceiveQuantity
+            _exactQuantity,
+            _isSendTokenFixed
         );
         _validatePreTradeData(tradeInfo);
-        _executeTrade(tradeInfo, _tradeData);
+        _executeTrade(tradeInfo.ckToken, tradeInfo.exchangeAdapter, tradeInfo.sendToken, tradeInfo.receiveToken, tradeInfo.totalSendQuantity, tradeInfo.totalReceiveQuantity, tradeInfo.data);
         _validatePostTrade(tradeInfo);
         uint256 totalSendQuantity = tradeInfo.preTradeSendTokenBalance.sub(_snapshotTargetTokenBalance(_ckToken, _sendToken));
         uint256 totalReceiveQuantity = _snapshotTargetTokenBalance(_ckToken, _receiveToken).sub(tradeInfo.preTradeReceiveTokenBalance);
@@ -909,8 +922,6 @@ contract IssuanceModuleV2 is Ownable, ModuleBase, ReentrancyGuard {
             _ckToken.invokeApprove(_underlyingToken, spender, _underlyingQuantity.add(1));
         }
 
-        console.log("_underlyingToken: ", _underlyingToken);
-        console.log("_wrappedToken: ", _wrappedToken);
         // Get function call data and invoke on CKToken
         _createWrapDataAndInvoke(
             _ckToken,

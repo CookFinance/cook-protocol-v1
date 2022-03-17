@@ -28,21 +28,16 @@ import { PreciseUnitMath } from "../../../lib/PreciseUnitMath.sol";
  * @title YearnWrapAdapter
  * @author Cook Finance, Ember Fund
  *
- * Wrap adapter for Yearn that returns data for wraps/unwraps of tokens
+ * Wrap adapter specifically for Yield Yak AVAX Strategeis that return data for wraps/unwraps of tokens
  */
-contract YieldYakStrategyV2Adapter is Ownable {
+contract YieldYakAVAXStrategyAdapter is Ownable {
     using SafeMath for uint256;
     using PreciseUnitMath for uint256;
     address public constant ETH_TOKEN_ADDRESS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
-    struct YakStrategyConfig {
-        address depositToken;
-        uint8 decimals;
-    }
+    mapping(address => bool) yakAvaxStrategies;
 
-    mapping(address => YakStrategyConfig) yakStrategyConfigs;
-    
-    event StrategyConfigUpdate(address Strategy, address depositToken, uint8 decimals);
+    event AvaxStrategyConfigUpdate(address Strategy, bool enabled);
 
     /* ============ Modifiers ============ */
 
@@ -81,8 +76,8 @@ contract YieldYakStrategyV2Adapter is Ownable {
         _onlyValidTokenPair(_underlyingToken, _wrappedToken)
         returns (address, uint256, bytes memory)
     {
-        bytes memory callData = abi.encodeWithSignature("deposit(uint256)", _underlyingUnits);
-        return (address(_wrappedToken), 0, callData);
+        bytes memory callData = abi.encodeWithSignature("deposit()");
+        return (address(_wrappedToken), _underlyingUnits, callData);
     }
 
     /**
@@ -161,12 +156,12 @@ contract YieldYakStrategyV2Adapter is Ownable {
     }
 
     /**
-     * Update config information for an Yak Strategy
+     * Update config information for an Yak Avax Strategy
      */
-    function updateYakStrategyConfig(address yakStrategyV2, YakStrategyConfig memory _config) external onlyOwner {
-        yakStrategyConfigs[yakStrategyV2] = _config;
-        emit StrategyConfigUpdate(yakStrategyV2, _config.depositToken, _config.decimals);
-    }
+    function updateYakStrategyConfig(address yakAvaxStrategyV2, bool enabled) external onlyOwner {
+        yakAvaxStrategies[yakAvaxStrategyV2] = enabled;
+        emit AvaxStrategyConfigUpdate(yakAvaxStrategyV2, enabled);
+    }    
 
     /* ============ Internal Functions ============ */
 
@@ -179,7 +174,6 @@ contract YieldYakStrategyV2Adapter is Ownable {
      * @return bool                Whether or not the wrapped token accepts the underlying token as collateral
      */
     function validTokenPair(address _underlyingToken, address _wrappedToken) internal view returns(bool) {
-        address unwrappedToken = yakStrategyConfigs[_wrappedToken].depositToken;
-        return unwrappedToken == _underlyingToken;
+        return yakAvaxStrategies[_wrappedToken] && _underlyingToken == ETH_TOKEN_ADDRESS;
     }
 }
